@@ -1,0 +1,1341 @@
+---
+title: "D0 D20 Differentiation"
+Authors: Ankush Sharma & Martin falck
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+invisible(utils::memory.limit(64000))
+```
+
+```{r import package, include=FALSE}
+#####
+#R libraries
+library(markdown)
+library(AnnotationHub)
+library(clustree)
+library(cowplot)
+library(ensembldb)
+library(ggthemes)
+library(ggplot2)
+library(ggplotify)
+library(gridGraphics)
+library(Matrix)
+library(org.Hs.eg.db)
+library(Matrix.utils)
+library(patchwork)
+library(reticulate)
+library(reshape2)
+library(RCurl)
+library(scCATCH)
+library(scales)
+library(scater)
+library(Seurat)
+library(SingleCellExperiment)
+library(SummarizedExperiment)
+library(EnsDb.Hsapiens.v86)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(chromVAR)
+library(tidyverse)
+library(edgeR)
+library(plotly)
+library(robustbase)
+library(knitr)
+library(ggpubr)
+library(clustree)
+library(extrafont)
+# Extra
+library(kableExtra) #load after dplyr
+#library(VISION)
+#library(dyno)
+library(JASPAR2018)
+library(TFBSTools)
+library(Signac)
+
+
+#extrafont::font_import()
+extrafont::loadfonts()
+
+
+
+# Seed (set for reproducibility)
+set.seed(1234)
+
+# Increase threshold before R starts showing scientific notation
+options(scipen = 10L)
+
+
+```
+
+<!-- ####################################   -->
+<!--    #loading data and Quality Control   -->
+<!-- ####################################   -->
+```{r importing files }
+# Load the  D0 and D20 Diff_scRNA aggregated dataset 
+library(Seurat)
+
+# Settings for the current run
+currentjob <- "Diffd0d20_unfilt"
+
+# Path and name
+dirname1<- "~/Dropbox (UiO)/Paracetamol_shared/SINGLE_CELL_ANALYSIS/AGGREGATED_ANALYSIS/DIFFERENTIATION/aggr_d0_ctrl/outs/filtered_feature_bc_matrix/"
+
+# scRNAseq - Initialize the Seurat object with the raw (non-normalized data).
+diff_d0d20.data <- Read10X(data.dir = dirname1)
+Day0 <- CreateSeuratObject(counts = diff_d0d20.data, 
+                           min.cells = 3, 
+                           min.features = 200, 
+                           project = "d0-Ctrl",
+                           assay = "RNA",
+                           names.delim = "-")
+
+dirname2<- "~/Dropbox (UiO)/Paracetamol_shared/SINGLE_CELL_ANALYSIS/AGGREGATED_ANALYSIS/DIFFERENTIATION/aggr_d20_ctrl/outs/filtered_feature_bc_matrix/"
+
+diff_d0d20.data <- Read10X(data.dir = dirname2)
+Day20 <- CreateSeuratObject(counts = diff_d0d20.data, 
+                           min.cells = 3, 
+                           min.features = 200, 
+                           project = "d20-Ctrl",
+                           assay = "RNA",
+                           names.delim = "-")
+
+
+
+differentiation.combined <- merge(Day0, y = Day20, add.cell.ids = c("Day 0","Day 20"), project = "D0_D20_Differentiation")
+differentiation.combined
+
+head(colnames(differentiation.combined))
+
+table(differentiation.combined$orig.ident)
+diff_d0d20 <- differentiation.combined
+
+```
+
+<!-- ####################################   -->
+<!--    # Quality Control Metrics  -->
+<!-- ####################################   -->
+
+
+```{r QC metrics -violin plots1}
+# scRNAseq
+counts_per_cell <- Matrix::colSums(diff_d0d20)
+counts_per_gene <- Matrix::rowSums(diff_d0d20)
+genes_per_cell <- Matrix::colSums(diff_d0d20)
+# Plots
+
+# Counts per cell
+p1 <- qplot(log10(counts_per_cell+1), geom = "histogram", main="Counts per cell",
+        xlab="log10 Counts per cell",
+        fill=I('#CAB8CB'),
+        col=I("black"))
+pdf(file = paste0("QCmetrics_counts_per_cell-",currentjob,".pdf"), width=8, height=6, paper='special')
+p1 <- qplot(log10(counts_per_cell+1), geom = "histogram", main="Counts per cell",
+        xlab="log10 Counts per cell",
+        fill=I('#CAB8CB'),
+        col=I("black"))+theme(text=element_text(size=12,  family="Arial"))
+dev.off()
+
+# Genes per cell
+
+p2 <- qplot(log10(genes_per_cell+1), geom = "histogram", main="Genes per cell",
+        xlab="log10 Genes per cell",
+        fill=I('#CAB8CB'),
+        col=I("black"))
+pdf(file = paste0("QCmetrics_Genes_per_cell.pdf-",currentjob,".pdf"), width=8, height=6, paper='special')
+p2 <- qplot(log10(genes_per_cell+1), geom = "histogram", main="Genes per cell",
+        xlab="log10 Genes per cell",
+        fill=I('#CAB8CB'),
+        col=I("black"))
+dev.off()
+
+
+# Counts per cell vs Genes per cell
+p3 <- qplot(counts_per_cell, genes_per_cell, log = "xy", colour=I('#aa93ab'), main="Counts vs Genes per cell", ylab = "Genes", xlab="Counts")
+pdf(file = paste0("QCmetrics_counts_vs_genespercell-",currentjob,".pdf"), width=8, height=6, paper='special')
+p3 <- qplot(counts_per_cell, genes_per_cell, log = "xy", colour=I('#aa93ab'), main="Counts vs Genes per cell", ylab = "Genes", xlab="Counts")
+dev.off()
+
+
+# Histogram of Counts per gene in log10 scale
+p4 <- qplot(log10(counts_per_gene+1), geom = "histogram", main="Counts per gene",
+             xlab="log10 Counts per gene",
+        fill=I('#CAB8CB'),
+        col=I("black"))
+
+pdf(file = paste0("QCmetrics_counts_per_gene-",currentjob,".pdf"), width=8, height=6, paper='special')
+p4 <- qplot(log10(counts_per_gene+1), geom = "histogram", main="Counts per gene",
+        xlab="log10 Counts per gene",
+        fill=I('#CAB8CB'),
+        col=I("black"))
+dev.off()
+
+
+(p1 & p2) / (p3 & p4)
+dev.copy(pdf,"QCmetrics_panel_1.pdf")
+dev.off()
+
+```
+
+
+```{r QC metrics -violin plots2}
+diff_d0d20[["percent.mt"]] <- PercentageFeatureSet(diff_d0d20, pattern = "^MT-")
+
+# Show QC metrics for the first 5 cells
+head(diff_d0d20@meta.data, 5)
+
+# Visualize QC metrics as a violin plot
+p1 <- VlnPlot(object = diff_d0d20, features = c("nCount_RNA","nFeature_RNA","percent.mt"), ncol = 3, pt.size = 0.2)
+p1
+dev.copy(pdf,paste0("QCmetrics-",currentjob,".pdf"))
+dev.off()
+
+```
+
+```{r feature scatter plots}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot2 <- FeatureScatter(diff_d0d20, feature1 = "nCount_RNA", feature2 = "percent.mt") + ggtitle("Counts vs Mitochondrial percentage") +  theme(plot.title = element_text(size = 12, face = "bold")) + NoLegend() + theme(text = element_text(size = 10))+theme(text=element_text(size=12,  family="Arial"))
+plot3 <- FeatureScatter(diff_d0d20, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + ggtitle("Counts vs Features") +  theme(plot.title = element_text(size = 12, face = "bold")) + NoLegend() + theme(text = element_text(size = 10))
+plot2 + plot3
+dev.copy(pdf,paste0("Featurescatter-",currentjob,".pdf"))
+dev.off()
+```
+
+```{r Percentage feature set, message=FALSE, warning=FALSE}
+# Add mitochondria gene % information
+diff_d0d20 <- PercentageFeatureSet(diff_d0d20, pattern = "^MT-", col.name = "percent.mt")
+# Plot and save QC metrics for dataset (unfiltered)
+VlnPlot(diff_d0d20, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, combine = TRUE)
+dev.copy(pdf,paste0(currentjob,"_1.nFeat-nCount-perMT.pdf"), width=8, height=10, paper='special')
+dev.off()
+```
+
+
+```{r CC Scoring, message=FALSE, warning=FALSE}
+# Import cell cycle (cc) genes stored in Seurat then do cc scoring on dataset
+# As an alternative to completely removing cell-cycle signal this workflow regress out the difference between the G2M and S-phase scores. Seurat recommends this for differentiating cells and it was best in tests.
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+diff_d0d20 <- CellCycleScoring(diff_d0d20, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+diff_d0d20$CC.Difference <- diff_d0d20$S.Score - diff_d0d20$G2M.Score
+
+# Visualize the distribution of cell cycle markers across
+RidgePlot(diff_d0d20, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
+dev.copy(pdf,paste0(currentjob,"_2.CC-markers-distribution.pdf"), height=5, width=8)
+dev.off()
+```
+
+
+```{r SCTransform normalization, message=FALSE, warning=FALSE, include=FALSE}
+# Normalization and scaling with SCTransform (see Seurat webpage for information)
+diff_d0d20 <- SCTransform(diff_d0d20, vars.to.regress = c("percent.mt","CC.Difference"))
+
+
+```
+
+```{r PCA, message=FALSE, warning=FALSE}
+# Run PCA
+diff_d0d20 <- RunPCA(diff_d0d20, verbose = FALSE)
+```
+
+<!-- ####################################   -->
+<!--    #Clustree branchpoint analysis      -->
+<!-- ####################################   -->
+```{r Clustree, message=FALSE, warning=FALSE}
+# This code can be used to evaluate what resolution can be used when running clustering algorithm (louvain)
+# It is only an approximation of how many clusters are reasonable. 
+
+# Run the FindClusters with a vector of different values then run clustree and see where datset has stabile branching then use that resolution for further analysis. 
+diff_d0d20 <- FindNeighbors(diff_d0d20, dims = 1:30, verbose = FALSE)
+diff_d0d20 <- FindClusters(diff_d0d20, resolution = c(
+  0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.7,0.8,1),
+  verbose = FALSE)
+diff_d0d20 <- RunUMAP(diff_d0d20, dims = 1:30, verbose = FALSE)
+
+# Clustree plots
+clustree(diff_d0d20, prefix="SCT_snn_res.", use_core_edges=TRUE, label=T)
+dev.copy(pdf,paste0(currentjob,"_3.Clustree.pdf"), height=5, width=8)
+dev.off()
+clustree_overlay(diff_d0d20, x_value = "umap1", y_value = "umap2", red_dim = "umap", prefix="SCT_snn_res.")
+dev.copy(pdf,paste0(currentjob,"_3.2.ClustreeOverlay.pdf"), height=5, width=8)
+dev.off()
+
+# Once decided on a resolution, rerun FindClusters with the picked value (in this case 0.5)
+diff_d0d20 <- FindClusters(diff_d0d20, resolution = 0.5, verbose = FALSE)
+```
+
+
+#Clustering and dimensions reduction (UMAP)
+```{r, message=FALSE, warning=FALSE}
+# Pick appropriate dims from Elbowplot (when it flattens enough). 
+# Use Jackstraw for more accuracy if needed
+# Tweak FindNeigbors in Clustree chunk if you change dims!
+
+ElbowPlot(diff_d0d20, ndims = 50)
+dev.copy(pdf,paste0(currentjob,"_4.Elbowplot.pdf"), height=5, width=8)
+dev.off()
+
+# Standard Seurat3, remember the resolution from Clustree above!
+diff_d0d20 <- RunUMAP(diff_d0d20, dims = 1:30, verbose = FALSE)
+diff_d0d20 <- FindNeighbors(diff_d0d20, dims = 1:30, verbose = FALSE)
+diff_d0d20 <- FindClusters(diff_d0d20, resolution = 0.5, verbose = FALSE)
+DimPlot(diff_d0d20, label = TRUE, label.size = 5)
+dev.copy(pdf,paste0(currentjob,"_5.UMAP.un-labelled-clusters.pdf"), height=5, width=8)
+dev.off()
+
+```
+
+
+```{r Find cluster markers, message=FALSE, warning=FALSE}
+# Run normalization and scaledata on "RNA" slot as recommended by Seurat/Satijahlab
+DefaultAssay(diff_d0d20) <- "RNA"
+diff_d0d20 <- NormalizeData(diff_d0d20, assay="RNA")
+diff_d0d20 <- FindVariableFeatures(diff_d0d20, selection.method = "vst", nfeatures = 2000, assay="RNA")
+top10 <- head(VariableFeatures(diff_d0d20), 10)
+diff_d0d20 <- ScaleData(diff_d0d20, vars.to.regress = c("percent.mt","CC.Difference"))
+
+diff_d0d20.markers <- FindAllMarkers(diff_d0d20, only.pos = F, min.pct = 0.1, logfc.threshold = 0.2)
+top500 <- diff_d0d20.markers %>% group_by(cluster) %>% top_n(n = 500, wt = avg_log2FC)
+
+# Write markers to file
+write.table(top500, paste0(currentjob,"_Unfilt.Top500-cluster-markers.csv"))
+
+```
+
+
+```{r Heatmap: Top10 genes per Cluster1, message=FALSE, warning=FALSE}
+# setting slim.col.label to TRUE will print just the cluster IDS instead of
+# every cell name
+top10 <- diff_d0d20.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(diff_d0d20, features = top10$gene, label = FALSE)+ scale_fill_gradientn(colors = c("#8CC2CA","#8175AA","#FFC966"))
+pdf(file = paste0(currentjob,"_6.heatmap.Top10-cluster-markers.pdf"), width=12, height=14, paper='special')
+DoHeatmap(diff_d0d20, features = top10$gene, label = FALSE) 
+dev.off()
+
+```
+
+
+```{r UMAP PLOTS, message=FALSE, warning=FALSE}
+# Change back to "SCT" assay for dims/clusters
+DefaultAssay(diff_d0d20) <- "SCT"
+
+# Make UMAP with labels from scCatch
+plot9 <- DimPlot(diff_d0d20, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+HoverLocator(plot = plot9, information = FetchData(diff_d0d20, vars = c("ident", "PC_1", "nFeature_RNA")))
+pdf(file = paste0(currentjob,"_7.UMAP-scCatch.unFilt.pdf"), width=8, height=5, paper='special')
+DimPlot(diff_d0d20, reduction = "umap", label = TRUE, pt.size = 0.5)
+dev.off()
+
+# So some labels do not look great considering what the sample i made up from. We should check QC metrics on clusters! E.g. for day 20 some are labelled ESCs!
+DimPlot(diff_d0d20, label = TRUE, label.size = 5, reduction = 'umap', group.by = 'orig.ident')
+
+```
+
+```{r Save end-RDS nr 1 of 2, message=FALSE, warning=FALSE}
+# Save final RDS and countfile (files 1 of 2, unfiltered)
+saveRDS(diff_d0d20, file = paste0(currentjob,"_FirstIteration.rds"))
+sct.counts <- diff_d0d20@assays$SCT@counts
+write.csv(sct.counts, paste0(currentjob,"_FirstIteration_countMatrix-unFilt.csv"))
+```
+
+
+
+```{r Unfiltered dataset, warning=FALSE}
+# Check the processed dataset for re-evaluation on counts, features and percent mt across cell types
+# We found this to be a good diagnostic to tweak QC, filtering using isOutlier() from scater as we can look at both biology and QC metrics across clusters and annotation and THEN we can do filtering to not loose important cells.
+# Add the active ident (assigned cell types by scCatch) to metadata as 'cell_type'
+currentjob <- "Diff_d0d20_"
+
+names(diff_d0d20@meta.data)
+diff_d0d20 <- AddMetaData(diff_d0d20, metadata =diff_d0d20@active.ident ,col.name = 'cell_type')
+
+# Print table with n cells and fraction per cluster/cell-type
+table(Idents(diff_d0d20))
+prop.table(table(Idents(diff_d0d20)))
+
+# VlnPlot counts, features and % mit grouped by cell-type
+VlnPlot(diff_d0d20, c("nCount_RNA"), pt.size = 0.1, ncol = 1, group.by = "cell_type") + NoLegend()
+dev.copy(pdf,paste0(currentjob,"_8.ReEval.nCount-cell-type.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20, c("nFeature_RNA"), pt.size = 0.1, ncol = 1, group.by = "cell_type") + NoLegend()
+dev.copy(pdf,paste0(currentjob,"_8.ReEval.nFeature-cell-type.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20, c("percent.mt"), pt.size = 0.1, ncol = 1, group.by = "cell_type") + NoLegend()
+dev.copy(pdf,paste0(currentjob,"_8.ReEval.percent.mt-cell-type.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+# Scatterplot comparing counts to % mit
+FeatureScatter(diff_d0d20, feature1 = "nCount_RNA", feature2 = "percent.mt") + ggtitle(label = "Scatter: count vs % mt | Unfiltered data")
+dev.copy(pdf,paste0(currentjob,"_8.ReEval.scatter.count.vs.mt.pdf"), width=8, height=5, paper='special')
+dev.off()
+FeatureScatter(diff_d0d20, feature1 = "nCount_RNA", feature2 = "percent.mt") + ggtitle(label = "Scatter: count vs % mt | Unfiltered data")+ scale_x_continuous(name="nCount_RNA", limits=c(0, 10000))
+dev.copy(pdf,paste0(currentjob,"_8.ReEval.scatter.count.vs.mt.ZOOM.pdf"), width=8, height=5, paper='special')
+dev.off() 
+```
+
+<!-- ####################################   -->
+<!--    #ReEvaluation of Dataset   -->
+<!-- ####################################   -->
+
+
+```{r Scater analysis, echo=TRUE, warning=FALSE}
+
+# Work from a newly named qc dataset
+diff_d0d20.qc <- diff_d0d20
+
+# Change back to the raw counts
+DefaultAssay(diff_d0d20.qc) <- "RNA"
+DefaultAssay(diff_d0d20.qc) #Confirm
+
+# Rerun PercentageFeatureSet
+diff_d0d20.qc <- PercentageFeatureSet(diff_d0d20.qc, pattern = "^MT-", col.name = "percent.mt")
+
+
+# Scater detection of outliers, isOutlier()
+# nmads=  3 is used here to set a proper filter level to identify the cells that can be removed with this threshold
+discard.mito <- isOutlier(diff_d0d20.qc$percent.mt, type="higher", nmads=3)
+
+
+#Summmary gives a certain amount of cells that will be removed.
+summary(discard.mito)
+
+# Plot counts vs mit % and add horizontal line 
+plot(diff_d0d20.qc$nCount_RNA, diff_d0d20.qc$percent.mt, log="x",
+    xlab="Total count", ylab='Mitochondrial %')
+abline(h=attr(discard.mito, "thresholds")["higher"], col="red")
+dev.copy(pdf,paste0(currentjob,"_10.FILT.qc_countsVSmitpercent.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+lost <- calculateAverage(diff_d0d20.qc@assays$RNA@counts[,!discard.mito])
+kept <- calculateAverage(diff_d0d20.qc@assays$RNA@counts[,discard.mito])
+
+# If discarded pool is enriched for a certain cell type, we should observe increased expression of the corresponding marker genes.
+logged <- cpm(cbind(lost, kept), log=TRUE, prior.count=2)
+logFC <- logged[,1] - logged[,2]
+abundance <- rowMeans(logged)
+is.mito <- grep("^MT-",rownames(diff_d0d20.qc@assays$RNA),ignore.case = TRUE)
+plot(abundance, logFC, xlab="Average count", ylab="Log-FC (lost/kept)", pch=16)
+points(abundance[is.mito], logFC[is.mito], col="dodgerblue", pch=16)
+dev.copy(pdf,paste0(currentjob,"_10.FILT.qc_logFC-abundance-in-Discarded-Cells.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+# Top 200 gene set of positive log-fold changes, remove unwanted cells and create .hESC
+# Analyze this list to know what nmads= threshold is suitable for keeping cells/features that are interesting
+coefs <- predFC(cbind(lost, kept), design=cbind(1, c(1, 0)))[,2]
+info <- data.frame(logFC=coefs, Lost=lost, Kept=kept, 
+    row.names=rownames(diff_d0d20.qc))
+top200_info <- head(info[order(info$logFC, decreasing=TRUE),], 200)
+
+```
+
+
+
+```{r SCATER outlier filter on determined nmads, echo=TRUE}
+# Using that nmads value=5 and comparing it with diagnostic plots for comparison with other nmads threshold e.g 3,4,6
+discard.mito <- isOutlier(diff_d0d20.qc$percent.mt, type="higher", nmads=5)
+summary(discard.mito)
+plot(diff_d0d20.qc$nCount_RNA, diff_d0d20.qc$percent.mt, log="x",
+    xlab="Total count", ylab='Mitochondrial %')
+abline(h=attr(discard.mito, "thresholds")["higher"], col="red")
+dev.copy(pdf,paste0(currentjob,"_10.2.FILT.mads5.qc_countsVSmitpercent.pdf"), width=8, height=6, paper='special')
+dev.off()
+lost <- calculateAverage(diff_d0d20.qc@assays$RNA@counts[,!discard.mito])
+kept <- calculateAverage(diff_d0d20.qc@assays$RNA@counts[,discard.mito])
+logged <- cpm(cbind(lost, kept), log=TRUE, prior.count=2)
+logFC <- logged[,1] - logged[,2]
+abundance <- rowMeans(logged)
+is.mito <- grep("^MT-",rownames(diff_d0d20.qc@assays$RNA),ignore.case = TRUE)
+plot(abundance, logFC, xlab="Average count", ylab="Log-FC (lost/kept)", pch=16)
+points(abundance[is.mito], logFC[is.mito], col="dodgerblue", pch=16)
+dev.copy(pdf,paste0(currentjob,"_10.2.FILT.mads5.qc_logFC-abundance-in-Discarded-Cells.pdf"), width=8, height=6, paper='special')
+dev.off()
+coefs <- predFC(cbind(lost, kept), design=cbind(1, c(1, 0)))[,2]
+info.nmads5 <- data.frame(logFC=coefs, Lost=lost, Kept=kept, 
+    row.names=rownames(diff_d0d20.qc))
+top200_nmads5.info <- head(info.nmads5[order(info.nmads5$logFC, decreasing=TRUE),], 200)
+top200_nmads5.info
+# Save the top200 list for documentation
+write.csv(top200_nmads5.info, paste0(currentjob,"_F.top200.nmads5.logFC-in-DiscardedPool.csv"))
+
+```
+
+#Rerun pipeline without nmads filtered outliers
+```{r Continue with filtered dataset using all steps in first run!, message=FALSE, warning=FALSE, include=FALSE}
+# Remove outliers from dataset
+# Remove above 50k reads and under 2000
+diff_d0d20.hESC <- diff_d0d20.qc[,!discard.mito]
+diff_d0d20.hESC <- subset(diff_d0d20.hESC, nCount_RNA >= 2000 & nCount_RNA <= 50000)
+
+# Rerun pipeline with .hESC dataset
+# CC-regression, SCTransform, PCA, etc
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+diff_d0d20.hESC <- CellCycleScoring(diff_d0d20.hESC, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+diff_d0d20.hESC$CC.Difference <- diff_d0d20.hESC$S.Score - diff_d0d20.hESC$G2M.Score
+diff_d0d20.hESC <- SCTransform(diff_d0d20.hESC, vars.to.regress = c("percent.mt","CC.Difference"))
+diff_d0d20.hESC <- RunPCA(diff_d0d20.hESC)
+diff_d0d20.hESC <- FindNeighbors(diff_d0d20.hESC,dims = 1:30, verbose = FALSE)
+diff_d0d20.hESC <- RunTSNE(diff_d0d20.hESC, dims = 1:30)
+diff_d0d20.hESC <- RunUMAP(diff_d0d20.hESC, dims = 1:30)
+```
+
+
+```{r Clustree II, echo=TRUE, warning=FALSE}
+# Run the FindClusters with a vector of different values analysis. 
+diff_d0d20.hESC <- FindNeighbors(diff_d0d20.hESC, dims = 1:30, verbose = FALSE)
+diff_d0d20.hESC <- FindClusters(diff_d0d20.hESC, resolution = c(
+  0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.7,0.8,0.9,1),
+  verbose = FALSE)
+diff_d0d20.hESC <- RunUMAP(diff_d0d20.hESC, dims = 1:30, verbose = FALSE)
+
+# Clustree II plots
+clustree(diff_d0d20.hESC, prefix="SCT_snn_res.", use_core_edges=TRUE, label=T)
+dev.copy(pdf,paste0(currentjob,"_11.FILT.Clustree.pdf"), height=5, width=8)
+dev.off()
+clustree_overlay(diff_d0d20.hESC, x_value = "umap1", y_value = "umap2", red_dim = "umap", prefix="SCT_snn_res.")
+dev.copy(pdf,paste0(currentjob,"_11.2.FILT.ClustreeOverlay.pdf"), height=5, width=8)
+dev.off()
+
+# Decided on e.g. 0.20 for the d20 sample
+DefaultAssay(diff_d0d20.hESC) <- "SCT"
+diff_d0d20.hESC <- FindClusters(diff_d0d20.hESC, resolution = 0.5, verbose = FALSE)
+diff_d0d20.hESC <- RunTSNE(diff_d0d20.hESC, dims = 1:30)
+diff_d0d20.hESC <- RunUMAP(diff_d0d20.hESC, dims = 1:30)
+
+```
+
+
+```{r markers filtered}
+DefaultAssay(diff_d0d20.hESC) <- "RNA"
+diff_d0d20.hESC <- NormalizeData(diff_d0d20.hESC, assay="RNA")
+diff_d0d20.hESC <- FindVariableFeatures(diff_d0d20.hESC, selection.method = "vst", nfeatures = 2000, assay="RNA")
+top10 <- head(VariableFeatures(diff_d0d20.hESC), 10)
+diff_d0d20.hESC <- ScaleData(diff_d0d20.hESC, vars.to.regress = c("percent.mt","CC.Difference"))
+
+#scCatch
+DefaultAssay(diff_d0d20.hESC) <- "RNA"
+diff_d0d20.hESC.markers <- FindAllMarkers(
+  diff_d0d20.hESC,
+  only.pos = F,
+  min.pct = 0.1,
+  logfc.threshold = 0.25)
+library(Seurat)
+top500.diff_d0d20.hESC <- diff_d0d20.hESC.markers %>% group_by(cluster) %>% top_n(n = 500, wt = avg_log2FC)
+top30.diff_d0d20.hESC <- diff_d0d20.hESC.markers %>% group_by(cluster) %>% top_n(n = 30, wt = avg_log2FC)
+
+plotUMAP1 <- DimPlot(diff_d0d20.hESC, reduction = "umap", label = TRUE, pt.size = 0.5)+theme(text=element_text(size=12,  family="Arial"))
+
+plotUMAP1
+dev.copy(pdf,paste0(currentjob,"_5.UMAP_Unlabeled.pdf"), height=5, width=8)
+dev.off()
+write.table(top500.diff_d0d20.hESC, paste0(currentjob,"_filt.Top500-cluster-markers.csv"))
+write.table(top30.diff_d0d20.hESC, paste0(currentjob,"_filt.Top30-cluster-markers.csv"))
+
+```
+
+```{r markers at Resolution 0.8}
+
+# Decided on e.g. 0.20 for the d20 sample
+DefaultAssay(diff_d0d20.hESC) <- "SCT"
+diff_d0d20.hESC1 <- FindClusters(diff_d0d20.hESC, resolution = 0.8, verbose = FALSE)
+diff_d0d20.hESC1 <- RunTSNE(diff_d0d20.hESC1, dims = 1:30)
+diff_d0d20.hESC1 <- RunUMAP(diff_d0d20.hESC1, dims = 1:30)
+# Run default normalization and scaleDATA on the "RNA" slot as recommended by Seurat/Satijalab
+DefaultAssay(diff_d0d20.hESC) <- "RNA"
+diff_d0d20.hESC1 <- NormalizeData(diff_d0d20.hESC1, assay="RNA")
+diff_d0d20.hESC1 <- FindVariableFeatures(diff_d0d20.hESC, selection.method = "vst", nfeatures = 2000, assay="RNA")
+top10 <- head(VariableFeatures(diff_d0d20.hESC1), 10)
+diff_d0d20.hESC1 <- ScaleData(diff_d0d20.hESC1, vars.to.regress = c("percent.mt","CC.Difference"))
+
+#scCatch
+DefaultAssay(diff_d0d20.hESC1) <- "RNA"
+diff_d0d20.hESC1.markers <- FindAllMarkers(
+  diff_d0d20.hESC1,
+  only.pos = F,
+  min.pct = 0.1,
+  logfc.threshold = 0.25)
+library(Seurat)
+top500.diff_d0d20.hESC1 <- diff_d0d20.hESC1.markers %>% group_by(cluster) %>% top_n(n = 500, wt = avg_log2FC)
+top30.diff_d0d20.hESC1 <- diff_d0d20.hESC1.markers %>% group_by(cluster) %>% top_n(n = 30, wt = avg_log2FC)
+
+plotUMAP1_0.8 <- DimPlot(diff_d0d20.hESC1, reduction = "umap", label = TRUE, pt.size = 0.5)+theme(text=element_text(size=12,  family="Arial"))
+
+plotUMAP1_0.8
+dev.copy(pdf,paste0(currentjob,"_5.UMAP_Unlabeled.pdf"), height=5, width=8)
+dev.off()
+write.table(top500.diff_d0d20.hESC1, paste0(currentjob,"_RES_0.8_filt.Top500_-cluster-markers.csv"))
+write.table(top30.diff_d0d20.hESC1, paste0(currentjob,"_RES_0.8_filt.Top30-cluster-markers.csv"))
+
+```
+
+
+<!-- ####################################   -->
+<!--   Plotting of data                     -->
+<!-- ####################################   -->
+
+```{r markers filtered}
+FeaturePlot(object = diff_d0d20.hESC, features = c("OTP"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_1.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("ISL1"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_2.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("SIX3","SIX6"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_3.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("DLX1","DLX2"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_4.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("DLX5","DLX6"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_5.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("NKX2-1","LHX2"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_7.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("ASCL1","GNRH1"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_8.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("SP9","ARX"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_9.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("FANCI","LHX2"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_10.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("DCX","NES","VIM"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_11.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("TUBB3"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_12.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("SOX2","DHCR24","SOX21"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_13.pdf"), height=5, width=8)
+dev.off()
+FeaturePlot(object = diff_d0d20.hESC, features = c("PODXL","DHCR24","VCAN"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_14.pdf"), height=5, width=8)
+dev.off()
+
+FeaturePlot(object = diff_d0d20.hESC, features = c("FOXD3-AS1","TUBB4B","PRDX1"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"featureplots_15.pdf"), height=5, width=8)
+dev.off()
+
+FeaturePlot(object = diff_d0d20.hESC, features = c("SMC4","CD24","FOXG1","IGFBP5"), reduction = "umap")+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"featureplots_15.pdf"), height=5, width=8)
+dev.off()
+```
+
+```{r Heatmap: Top10 genes, message=FALSE, warning=FALSE}
+
+# setting slim.col.label to TRUE will print just the cluster IDS instead of
+# every cell name
+top10 <- diff_d0d20.hESC.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(diff_d0d20.hESC, features = top10$gene, label = FALSE) + scale_fill_gradientn(colors = c("#8CC2CA","#8175AA","#FFC966")) + theme(text=element_text(size=12,  family="Arial"))
+pdf(file = paste0(currentjob,"_6_FILT.heatmap.Top10-cluster-markers.pdf"), width=12, height=14, paper='special')
+DoHeatmap(diff_d0d20.hESC, features = top10$gene, label = FALSE) + scale_fill_gradientn(colors = c("#8CC2CA","#8175AA","#FFC966")) + theme(text=element_text(size=12,  family="Arial"))
+dev.off()
+
+```
+
+
+
+```{r UMAP by origin, message=FALSE, warning=FALSE }
+library(Seurat)
+
+
+#UMAP by origin
+library(crosstalk)
+currentjob="Diff_Merged_Final"
+DimPlot(diff_d0d20.hESC, label = FALSE, label.size = 4, reduction = 'umap', group.by = 'orig.ident',repel = TRUE, cols =c('d0-Ctrl' = '#FF9888', 'd7-Ctrl' = '#B60A1C','d13-Ctrl' = '#C3CE3D','d20-Ctrl' = '#C0D6E4')) #+ theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_5.UMAPbyOrigin.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+
+plotUMAP2 <-  DimPlot(diff_d0d20.hESC, label = TRUE, label.size = 5, reduction = 'umap', group.by = 'orig.ident')+theme(text=element_text(size=12,  family="Arial"))
+plotUMAP2
+HoverLocator(plot = plotUMAP2, information = FetchData(diff_d0d20.hESC, vars = c("ident", "PC_1", "nFeature_RNA","percent.mt")))
+
+
+```
+
+<!-- ####################################   -->
+<!--    #Renaming Cluster Names  and colors -->
+<!-- ####################################   -->
+
+
+```{r cell cycle  }
+
+
+
+DimPlot(diff_d0d20.hESC, label = FALSE, label.size = 4, reduction = 'umap', group.by = 'Phase',repel = TRUE, cols =c('S' = '#A72625', 'G2M' = '#8175AA','G1' = '#ffa500' ))+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_5.Cell_Cycle_Origin.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+plotUMAP3 <-  DimPlot(diff_d0d20.hESC, label = TRUE, label.size = 5, reduction = 'umap', group.by = 'orig.ident')+theme(text=element_text(size=12,  family="Arial"))
+plotUMAP3
+HoverLocator(plot = plotUMAP3, information = FetchData(diff_d0d20.hESC, vars = c("ident", "PC_1", "nFeature_RNA","percent.mt")))
+```
+
+<!-- ####################################   -->
+<!--    #Renaming Cluster Names             -->
+<!-- ####################################   -->
+
+
+```{r Rearranging cluster names  }
+#Rearranging cluster names from default numbers assigned By Seurat, in order to facilitate constraining of  Single cell ATAC seq  clusters for optimal integration multi-omics data 
+coherent_fil.cluster.ids <- c("R7","R1","R9","R0","R12","R2","R3","R11","R8","R13","R10","R14","R15")
+diff_d0d20.hESC$original_seurat_clusters
+Idents(diff_d0d20.hESC) <- "seurat_clusters"
+names(coherent_fil.cluster.ids) <- levels(diff_d0d20.hESC)
+diff_d0d20.hESC <- RenameIdents(diff_d0d20.hESC, coherent_fil.cluster.ids)
+DimPlot(diff_d0d20.hESC, reduction = "umap", label = TRUE,group.by = "ident", pt.size = 0.5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))
+dev.copy(pdf,paste0(currentjob,"_13.NEW_RENAME_NUMBERS_FILT.UMAP_final.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+```
+
+
+
+```{r Single cell heatmap of feature expression3}
+# Heatmap for the genes of interest
+
+#Selected140 genes
+#Genes of interest
+DoHeatmap(subset(diff_d0d20.hESC, downsample = 100), features  = c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN ", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "DKMN", "NSG1", "JHY"), size = 2) + scale_fill_gradientn(colors = c("#8CC2CA","#8175AA","#FFC966")) +theme(text=element_text(size=7, family="Arial")) + NoLegend()
+
+
+DoHeatmap(subset(diff_d0d20.hESC, downsample = 100), features  = c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN ", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "DKMN", "NSG1", "JHY"), size = 2) + scale_fill_gradientn(colors = c("#8CC2CA","#8175AA","#FFC966")) + theme(text=element_text(size=7, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_14_Heatmap_140_GENES_OF_INTEREST.pdf"), width=10, height=14, paper='special')
+dev.off()
+dev.set(dev.next())
+
+
+#SELECTED70 GENES
+DoHeatmap(subset(diff_d0d20.hESC, downsample = 100), features  = c("SOX2", "IGFBP5", "RAX", "LIX1", "PAX6", "HESX1", "PAMR1", "FOXH1", "CDH1", "TDGF1", "DNMT3B", "EPCAM", "PODXL", "ID1", "POU5F1", "GAL", "FOXD3-AS1", "DPPA4", "NR6A1", "CD24", "ZIC2", "FGF8", "DLX6", "DLX5", "BMP4", "GRIA1", "SIX6", "NKX2-1", "NEUROG1", "DLL1", "ASCL1", "NHLH1", "NEUROD1", "FEZF2", "L1CAM", "INA", "GRIA2", "GNRH1", "INSM1", "ELAVL4", "ISL1", "TH", "DCX", "TAGLN3", "SCG2", "ELAVL3", "PCSK2", "MAP6", "HES6", "DLL3", "TLX3", "NEUROD4", "SYP", "STMN2", "POU2F2", "TUBB3", "SNAP25", "NSG2", "GAP43", "NEFM", "NEFL", "RET", "NTRK3", "RELN", "NTRK1", "DLX2", "DLX1", "GAD1", "ARX", "SOX3", "SYT4", "SPARCL1", "OTX2", "LMO1", "FABP7", "DCT", "VEPH1", "PRRX1", "CDK6", "GNG11", "HES1", "TYMS", "PCNA", "CDK1", "DLX6-AS1", "TUBB4B", "SELENOP", "ID2", "CRABP1", "APOE", "LDHA", "FZD5", "KRT18", "FGF17"), size = 2) + scale_fill_gradientn(colors = c("#8CC2CA","#8175AA","#FFC966")) +theme(text=element_text(size=7, family="Arial"))
+
+DoHeatmap(subset(diff_d0d20.hESC , downsample = 100), features  = c("SOX2", "IGFBP5", "RAX", "LIX1", "PAX6", "HESX1", "PAMR1", "FOXH1", "CDH1", "TDGF1", "DNMT3B", "EPCAM", "PODXL", "ID1", "POU5F1", "GAL", "FOXD3-AS1", "DPPA4", "NR6A1", "CD24", "ZIC2", "FGF8", "DLX6", "DLX5", "BMP4", "GRIA1", "SIX6", "NKX2-1", "NEUROG1", "DLL1", "ASCL1", "NHLH1", "NEUROD1", "FEZF2", "L1CAM", "INA", "GRIA2", "GNRH1", "INSM1", "ELAVL4", "ISL1", "TH", "DCX", "TAGLN3", "SCG2", "ELAVL3", "PCSK2", "MAP6", "HES6", "DLL3", "TLX3", "NEUROD4", "SYP", "STMN2", "POU2F2", "TUBB3", "SNAP25", "NSG2", "GAP43", "NEFM", "NEFL", "RET", "NTRK3", "RELN", "NTRK1", "DLX2", "DLX1", "GAD1", "ARX", "SOX3", "SYT4", "SPARCL1", "OTX2", "LMO1", "FABP7", "DCT", "VEPH1", "PRRX1", "CDK6", "GNG11", "HES1", "TYMS", "PCNA", "CDK1", "DLX6-AS1", "TUBB4B", "SELENOP", "ID2", "CRABP1", "APOE", "LDHA", "FZD5", "KRT18", "FGF17"), size = 2) + scale_fill_gradientn(colors = c("#8CC2CA","#8175AA","#FFC966")) +theme(text=element_text(size=7, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_14_Heatmap_70_GENES_OF_INTEREST.pdf"), width=10, height=16, paper='special')
+dev.off()
+dev.set(dev.next())
+
+
+```
+
+
+```{r Violin plot1}
+VlnPlot(diff_d0d20.hESC,features =c("PAX6"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5, cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_PAX6.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("RAX"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5, cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_RAX.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+
+VlnPlot(diff_d0d20.hESC,features =c("LIX1"),ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_LIX1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("SOX2"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_SOX2.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("REST"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_REST.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("HES1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_HES1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("FABP7"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_FABP7.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("KIF15"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_KIF15.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("CDK1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_CDK1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("TYMS"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_TYMS.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("POU5F1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_POU5F1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("TDGF1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_TDGF1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("GAL"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GAL.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("ANLN"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_ANLN.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("NANOG"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_NANOG.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("NTRK1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_NTRK1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("STMN2"),pt.size =0.1,ncol = 1,same.y.lims =6, y.max = 6,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_STMN2.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("ISL1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_ISL1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("L1CAM"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_L1CAM.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("NEUROG1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_NEUROG1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("NEUROD4"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_NEUROD4.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("NEUROD1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_NEUROD1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("HES6"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_HES6.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("GSX1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GSX1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("LRRC75A"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_LRRC75A.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("BMP4"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_BMP4.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("DLX5"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_DLX5.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("GNRH1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GNRH1.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("GNG8"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GNG8.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("DLX2"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_DLX2.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("GAD1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GAD1.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("GAD2"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GAD2.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("ARX"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_ARX.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("DLX6"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_DLX6.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("GRIA1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GRIA1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("PCNA"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_PCNA.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("REST"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_REST.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("CDH1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_CDH1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("CDH2"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_CDH2.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("PHC1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_PHC1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("PHC2"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_PHC2.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("LIN28A"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_LIN28A.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("FABP7"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_FABP7.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("GNG8"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_GNG8.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("CDKN1C"), pt.size =0.0,ncol = 1,same.y.lims =6, y.max = 6,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_CDKN1C.pdf"), width=8, height=8, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("LHX2"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_LHX2.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("FOXD3-AS1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_FOXD3-AS1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("FOXH1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_FOXH1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+
+VlnPlot(diff_d0d20.hESC,features =c("FGF8"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_FGF8.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("NKX2-1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_NKX2-1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("SOX4"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_SOX4.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("CDK6"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_CDK6.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC,features =c("SOX9"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_SOX9.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+VlnPlot(diff_d0d20.hESC,features =c("FOXG1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_FOXG1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+
+VlnPlot(diff_d0d20.hESC,features =c("ID1"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_ID1.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+
+VlnPlot(diff_d0d20.hESC,features =c("FOXG3"),pt.size = 0,ncol = 1,same.y.lims =5, y.max = 5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))+theme(text=element_text(size=12, family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_15.FILT.VLNPLOT_FOXG3.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+```
+
+
+```{r QCmetric - Violin plot}
+
+#plots with QC information on Cluster
+table(Idents(diff_d0d20.hESC))
+prop.table(table(Idents(diff_d0d20.hESC)))
+
+VlnPlot(diff_d0d20.hESC, c("nCount_RNA"), pt.size = 0.1, ncol = 1, group.by = "cell_type") + NoLegend()+ theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_13.FILT.nCount-cell-type.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC, c("nFeature_RNA"), pt.size = 0.1, ncol = 1, group.by = "cell_type") + NoLegend()+ theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_13.FILT.nFeature-cell-type.pdf"), width=8, height=6, paper='special')
+dev.off()
+VlnPlot(diff_d0d20.hESC, c("percent.mt"), pt.size = 0.1, ncol = 1, group.by = "cell_type") + NoLegend()+ theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_13.FILT.percent.mt-cell-type.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+# FILT scatter feature vs % mit
+FeatureScatter(diff_d0d20.hESC, "nCount_RNA", "nFeature_RNA") + ggtitle(label = "Scatter_ feature vs % mt | Filtered data")+ theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_13.FILT.scatter.feat.vs.mt.pdf"), width=8, height=5, paper='special')
+dev.off()
+
+# Calculate the average expression of all cells within a cluster
+cluster.averages.FILT <- AverageExpression(diff_d0d20.hESC, assays = "RNA")
+cluster.averages.FILT
+head(cluster.averages.FILT[["RNA"]][, 1:3])
+
+# Need to replace spaces " " with "_" so that ggplot does not fail
+cluster.averages.FILT.original <- levels(diff_d0d20.hESC)
+Idents(diff_d0d20.hESC) <- gsub(pattern = " ", replacement = "_", x = Idents(diff_d0d20.hESC))
+cluster.averages.FILT.original <- gsub(pattern = " ", replacement = "_", x = cluster.averages.FILT.original)
+levels(diff_d0d20.hESC) <- cluster.averages.FILT.original
+cluster.averages.FILT <- AverageExpression(diff_d0d20.hESC, assays = "RNA", return.seurat = TRUE)
+cluster.averages.FILT
+
+# Scatterplot among clusters
+CellScatter(cluster.averages.FILT, cell1 = "R1", cell2 = "R2") + theme(text=element_text(size=12,  family="Arial"))
+
+
+
+```
+
+```{r Save final 2/2 RDS file and count matrix!, message=FALSE, warning=FALSE, include=FALSE}
+# RDS For cytotrace 
+saveRDS(diff_d0d20.hESC, paste0(currentjob,"_for_cytotrace_rnabjects.qc-Filt.rds"))
+#Save SCT count to matrix
+write.csv(diff_d0d20.hESC@assays$SCT@counts, paste0(currentjob,"_endOfpipe_countMatrix-Filt.csv"))
+```
+
+
+```{r Cell-cycle genes!, echo=TRUE}
+# proportions of cell cycle genes # Shiny cell is easy and better to use for this analysis
+
+table(Idents(diff_d0d20.hESC))
+prop.table(table(Idents(diff_d0d20.hESC)))
+
+library(dplyr)
+library(kableExtra)
+# Print and save cells in cell-cycle
+# kable is pretty neat!
+table(diff_d0d20.hESC@meta.data$Phase) %>% 
+  kable(caption = "Number of Cells in each Cell Cycle Stage", "markdown",col.names = c("Stage", "Count"), align = "c") %>% kable_styling() 
+
+table(diff_d0d20.hESC@meta.data$seurat_clusters) %>% 
+  kable(caption = "Number of Cells in each Seurat clusters", "markdown",col.names = c("Stage", "Count"), align = "c") %>% kable_styling() 
+
+table(diff_d0d20.hESC@meta.data$seurat_clusters) %>% 
+  kable(caption = "Number of Cells in each Seurat clusters", "html",col.names = c("Stage", "Count"), align = "c") %>% kable_styling()  %>% save_kable(file = paste0(currentjob,"_H.FILT.Cells-in-seurat_clusters.html"), self_contained = T)
+
+table(diff_d0d20.hESC@meta.data$Phase) %>% 
+  kable(caption = "Number of Cells in each Cell Cycle Stage", "html",col.names = c("Stage", "Count"), align = "c") %>% kable_styling() %>% save_kable(file = paste0(currentjob,"_H.FILT.Cells-in-CellCycle.html"), self_contained = T)
+
+```
+```{r  cell propotions , echo=TRUE, message=FALSE, warning=FALSE}
+#Quantification of gene expressed in how many cells?
+#Number of cells in each cluster expressing genes
+
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        prct = unlist(lapply(genes,calc_helper, object=object))
+        result = data.frame(Markers = genes, Cell_proportion = prct)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes=genes)
+        for(i in 1:length(factors)){
+        results[[i]]$Feature = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_helper <- function(object,genes){
+    counts = object[['RNA']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells
+    }else{return(NA)}
+}
+NumCellsGene<-as.data.frame(PrctCellExpringGene(diff_d0d20.hESC ,genes =c("SEMA4A","SEMA4D","LIN28A","TACC3","SYP","HCRT","WNT7B","EMX2","GNG8","LHX9","BCL11A","RAX","HESX1","HES5","POU5F1","FGF8","DLX5","SIX6","NKX2-1","NEUROG1","ASCL1","NEUROD1","GNRH1","ELAVL4","TH","DCX","HES6","NEFM","RELN","SPARCL1","FABP7","GNG11","FN1","SCG3","SCG2"), group.by = "cell_type"))
+write.csv(NumCellsGene,"Number_of_cells_for_genes_in_Clusters.txt",sep="\t",quote = F, row.names = T)
+
+
+
+```
+
+
+
+```{r singleR, echo=TRUE}
+library(SingleR)
+diff_d0d20.anno <- diff_d0d20.hESC
+
+# Put normalized counts in an object for singleR
+singler.rna <- GetAssayData(diff_d0d20.hESC, assay = "RNA", slot = "data")
+
+# Get some more memory 
+rm(logged, info, info.nmads5, plot.data, plot9, diff_d0d20, diff_d0d20.data, diff_d0d20.markers, diff_d0d20.qc, diff_d0d203d)
+gc()
+
+# Datasets
+hpca.se <- HumanPrimaryCellAtlasData()
+bed.se <- BlueprintEncodeData()
+
+# REF HumanPrimaryCellAtlas
+common <- intersect(rownames(singler.rna), rownames(hpca.se))
+hpca.se <- hpca.se[common,]
+singler.rna <- singler.rna[common,]
+
+pred.hpca <- SingleR(test = singler.rna, ref = hpca.se, 
+    labels = hpca.se$label.fine, assay.type.ref = "logcounts")
+table(pred.hpca$labels)
+
+# Labels and plot
+diff_d0d20.anno <- diff_d0d20.hESC
+diff_d0d20.anno[["SingleR.labels"]] <- pred.hpca$labels
+DimPlot(
+  diff_d0d20.anno,
+  pt.size = 0.5,
+  reduction = "umap",
+  group.by = "SingleR.labels"
+)
+
+# REF BlueprintEncodeData
+singler.bed.rna <- GetAssayData(diff_d0d20.hESC, assay = "RNA", slot = "data")
+common <- intersect(rownames(singler.bed.rna), rownames(bed.se))
+bed.se <- bed.se[common,]
+singler.bed.rna <- singler.bed.rna[common,]
+pred.bed <- SingleR(test = singler.bed.rna, ref = bed.se, 
+    labels = bed.se$label.fine, assay.type.ref = "logcounts")
+table(pred.bed$labels)
+diff_d0d20.anno[["SingleR.BED"]] <- pred.bed$labels
+
+# Plots
+at1 <- DimPlot(diff_d0d20.anno,pt.size = 0.5,reduction = "umap",group.by = "SingleR.labels") + ggtitle(label = "Human Primary Cell Atlas")+ theme(text=element_text(size=12,  family="Arial"))
+at2 <- DimPlot(diff_d0d20.anno,pt.size = 0.5,reduction = "umap",group.by = "SingleR.BED") + ggtitle(label = "Blueprint Encode Data")+ theme(text=element_text(size=12,  family="Arial"))
+at1 / at2
+dev.copy(pdf,paste0(currentjob,"_17.FILT.singleR-UMAP.pdf"), width=8, height=7, paper='special')
+dev.off()
+# Heatmaps
+plotScoreHeatmap(pred.bed, max.labels = 15, main="Blueprint Encode Data")+ theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_16.FILT.singleR-HCA-labels-heatmap.pdf"), width=14, height=10, paper='special')
+dev.off()
+plotScoreHeatmap(pred.hpca, max.labels = 15, cellwidth=0.1,main="Human Primary cell Atlas")+ theme(text=element_text(size=12,  family="Arial"))
+dev.copy(pdf,paste0(currentjob,"_16.2.FILT.singleR-HCA-labels-heatmap.pdf"), width=14, height=10, paper='special')
+dev.off()
+
+table(pred.bed$labels)
+table(pred.hpca$labels)
+
+```
+
+
+
+<!-- ####################################           -->
+<!--#Cytotrace Analysis for diff trajectories       -->
+<!-- ####################################           -->
+
+```{r Cytotrace, echo=TRUE, message=FALSE, warning=FALSE}
+####Cytotrace analysis
+
+library(scRNAseq)
+library(SingleCellExperiment)
+library(reticulate)
+library(CytoTRACE)
+library(umap)
+
+Sys.setenv(RETICULATE_PYTHON="/usr/local/bin/python3.7")
+#use_python(Sys.which("python"))
+py_config()
+reticulate::import("scanorama")
+cytoT_A <- as.matrix(GetAssayData(diff_d0d20.hESC, "counts"))
+cytodf_list <- cytoT_A
+results <- CytoTRACE(cytodf_list,enableFast = FALSE, ncores=6)
+
+
+plotCytoTRACE(results)
+
+cyto_UMAP <- diff_d0d20.hESC@reductions[["umap"]]@cell.embeddings
+plotCytoTRACE(
+  cyto_obj = results,
+  phenotype = NULL,
+  gene = "HIST1H4C",
+  colors = NULL,
+  emb = cyto_UMAP,
+  outputDir = "./"
+) 
+
+
+plotCytoGenes(results,
+              numOfGenes = 10,
+              outputDir = "./"
+)
+```
+
+
+
+
+
+<!-- ####################################   -->
+<!--    #Pseudotime trajectories Slingshot   -->
+<!-- ####################################   -->
+
+```{r pseudotime trajectory SLingshot , echo=TRUE, message=FALSE, warning=FALSE}
+library(slingshot)
+library (viridis)
+library(dplyr)
+library(rsample)
+library(parsnip)
+library(ranger)
+library(RColorBrewer)
+####
+DimPlot(diff_d0d20.hESC, reduction = "pca",
+        group.by = "cell_type", pt.size = 0.5, label = TRUE, repel = TRUE) +
+scale_color_brewer(type = "qual", palette = "Set3")
+display.brewer.all()
+??scale_color_brewer
+dev.copy(pdf,paste0(currentjob,"_SLINGSHOT.PCAPLOT.SEURAT.pdf"), width=14, height=10, paper='special')
+dev.off()
+
+
+ DimPlot(diff_d0d20.hESC, reduction = "umap",
+        group.by = "cell_type", pt.size = 0.5, label = TRUE, repel = TRUE) +
+  scale_color_brewer(type = "qual", palette = "Set3")
+dev.copy(pdf,paste0(currentjob,"_SLINGSHOT.UMAP.SEURAT.pdf"), width=14, height=10, paper='special')
+dev.off()
+names(diff_d0d20.hESC@meta.data)
+
+sds <- slingshot(Embeddings(diff_d0d20.hESC, "umap"), clusterLabels = diff_d0d20.hESC$seurat_clusters,lineages = list(),
+                 start.clus = 3,end.clus = 6,  stretch = 2)
+??slingshot
+#' Assign a color to each cell based on some value
+#' 
+#' @param cell_vars Vector indicating the value of a variable associated with cells.
+#' @param pal_fun Palette function that returns a vector of hex colors, whose
+#' argument is the length of such a vector.
+#' @param ... Extra arguments for pal_fun.
+#' @return A vector of hex colors with one entry for each cell.
+cell_pal <- function(cell_vars, pal_fun,...) {
+  if (is.numeric(cell_vars)) {
+    pal <- pal_fun(100, ...)
+    return(pal[cut(cell_vars, breaks = 100)])
+  } else {
+    categories <- sort(unique(cell_vars))
+    pal <- setNames(pal_fun(length(categories), ...), categories)
+    return(pal[cell_vars])
+  }
+}
+
+cell_colors <- cell_pal(diff_d0d20.hESC$cell_type, brewer_pal("qual", "Set3"))
+cell_colors_clust <- cell_pal(diff_d0d20.hESC$seurat_clusters, hue_pal())
+
+##What does the inferred trajectory look like compared to cell types
+
+plot(reducedDim(sds), col = cell_colors, pch = 16, cex = 0.5)
+lines(sds, lwd = 2, type = 'lineages', col = 'black')
+dev.copy(pdf,paste0(currentjob,"_SLINGSHOT.LINEAGES.SEURAT.pdf"), width=14, height=10, paper='special')
+dev.off()
+
+plot(reducedDim(sds), col = cell_colors_clust, pch = 16, cex = 0.5)
+lines(sds, lwd = 2, type = 'lineages', col = 'grey')
+dev.copy(pdf,paste0(currentjob,"_SLINGSHOT.LINEAGES.SEURAT_cellcolorclusts.pdf"), width=14, height=10, paper='special')
+dev.off()
+
+plot(reducedDim(sds), col = cell_colors, pch = 16, cex = 0.5)
+lines(sds, lwd = 2, col = 'grey')
+dev.copy(pdf,paste0(currentjob,"_SLINGSHOT.LINEAGES.SEURAT_TRAJECTORIES.pdf"), width=14, height=10, paper='special')
+dev.off()
+
+nc <- 3
+pt <- slingPseudotime(sds)
+nms <- colnames(pt)
+nr <- ceiling(length(nms)/nc)
+pal <- viridis(100, end = 0.95)
+par(mfrow = c(nr, nc))
+for (i in nms) {
+  colors <- pal[cut(pt[,i], breaks = 100)]
+  plot(reducedDim(sds), col = colors, pch = 16, cex = 0.5, main = i)
+  lines(sds, lwd = 2, col = 'grey', type = 'lineages')
+}
+dev.copy(pdf,paste0(currentjob,"_SLINGSHOT.LINEAGES.SEURAT_pseudotime.curves.pdf"), width=14, height=10, paper='special')
+dev.off()
+
+
+
+##Differentially expressed genes
+
+# Get top highly variable genes
+top_hvg <- HVFInfo(object = diff_d0d20.hESC, selection.method = 'sct')[1:10000, ] %>% 
+  mutate(., bc = rownames(.)) %>% 
+  arrange(desc(residual_variance)) %>% 
+  top_n(1000, residual_variance) %>% 
+  pull(bc)
+# Prepare data for random forest
+dat_use <- t(GetAssayData(diff_d0d20.hESC, slot = "data")[top_hvg,])
+dat_use_df <- cbind(slingPseudotime(sds)[,2], dat_use) # Do curve 2, so 2nd columnn
+colnames(dat_use_df)[1] <- "pseudotime"
+dat_use_df <- as.data.frame(dat_use_df[!is.na(dat_use_df[,1]),])
+library(parsnip)
+dat_split <- initial_split(dat_use_df)
+dat_train <- training(dat_split)
+dat_val <- testing(dat_split)
+library(tidymodels)
+library(janitor)
+library(caret)
+
+colnames(dat_train)
+
+model <- rand_forest(mtry = 100, trees = 100, min_n = 15, mode = "regression") %>%
+  set_engine("ranger", importance = "impurity", num.threads = 3) %>%
+    fit(pseudotime ~., data = dat_train)
+
+
+val_results <- dat_val %>% 
+  mutate(estimate = predict(model, .[,-1]) %>% pull()) %>% 
+  select(truth = pseudotime, estimate)
+metrics(data = val_results, truth, estimate)
+
+var_imp <- sort(model$fit$variable.importance, decreasing = TRUE)
+top_genes <- names(var_imp)[1:6]
+# Convert to gene symbol
+top_gene_name <- dat_train$gene_name[match(top_genes, dat_train$gene)]
+
+
+par(mfrow = c(3, 2))
+for (i in seq_along(top_genes)) {
+  colors <- pal[cut(dat_use[,top_genes[i]], breaks = 100)]
+  plot(reducedDim(sds), col = colors, 
+       pch = 16, cex = 0.5, main = top_gene_name[i])
+  lines(sds, lwd = 2, col = 'black', type = 'lineages')
+}
+
+sessionInfo()
+```
+
+```{r SAVE RDS_FINAL, echo=TRUE, message=FALSE, warning=FALSE}
+saveRDS(diff_d0d20.hESC, paste0(currentjob,"_EndofPipe_Final_rnaobjects.qcFilt.rds"))
+```
+
+#Credits
+```{r Seurat, echo=TRUE, message=FALSE, warning=FALSE}
+#About Seurat
+#Seurat is a Bioconductor package containing a Shiny application for analyzing single cell RNA seq  expression data in different conditions and experimental factors.
+```
+
+```{r Script citation info, echo=TRUE, message=FALSE, warning=FALSE}
+# Ankush Sharma and Martin Falck 
+# If you use this script for your analysis, please acknowledge us and cite Seurat Version3 package
+
+```
+
+
+
+
+
+
+

@@ -1,0 +1,3714 @@
+---
+title: "Neuro Differentiation Single Cell RNAseq"
+Authors: Ankush Sharma & Martin Falck 
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+<!-- ####################################   -->
+<!--    #loading data and Quality Control   -->
+<!-- ####################################   -->
+
+```{r 1_library and work, include=FALSE}
+#Install ArchR
+#if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+#if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+#devtools::install_github("GreenleafLab/ArchR", ref="master", repos = BiocManager::repositories())
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+# install.packages("BiocManager")
+#BiocManager::install("BSgenome.Hsapiens.UCSC.hg38")}#
+#BiocManager::install("TxDb.Hsapiens.UCSC.hg38.knownGene")
+
+library(ArchR)
+ArchR::installExtraPackages()
+library(progress)
+library(hdf5r)
+library(HDF5Array)
+library(TFBSTools)
+library(hexbin)
+library(Seurat)
+set.seed(1)
+#Add Reference genome, we used hg38 as reference genome
+addArchRGenome("hg38")
+library(BSgenome.Hsapiens.UCSC.hg38)
+genomeAnnotation <- createGenomeAnnotation(genome = BSgenome.Hsapiens.UCSC.hg38)
+genomeAnnotation
+library(org.Hs.eg.db)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+currentjob <- "neuroDiffscATAC"
+# Memory settings
+options(future.globals.maxSize = 4000 * 1024^3) #Set a higher maximum memory size
+addArchRThreads(threads = 1) 
+
+geneAnnotation <- createGeneAnnotation(TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene, OrgDb = org.Hs.eg.db)
+geneAnnotation <- createGeneAnnotation(
+  TSS = geneAnnotation$TSS, 
+  exons = geneAnnotation$exons, 
+  genes = geneAnnotation$genes)
+
+```
+
+
+```{r 2_Creating ARROW files,include=FALSE}
+
+# Creating arrow files for ATAC seq for d0 and d20
+ArrowFiles <- createArrowFiles(
+  inputFiles <-c("~/Dropbox (UiO)/Paracetamol_shared/SINGLE_CELL_ATAC/core_facility_cellranger_analysis/d0_ctrl/fragments.tsv.gz","~/Dropbox (UiO)/Paracetamol_shared/SINGLE_CELL_ATAC/core_facility_cellranger_analysis/d20_ctrl/fragments.tsv.gz"),
+  sampleNames = c("D0_Ctrl","D20_Ctrl"),
+  filterTSS = 3, #Dont set this too high because you can always increase later
+  filterFrags = 1000, 
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+ArrowFiles
+```
+
+
+```{r 3_doublet score,include=FALSE}
+Sys.setenv('R_MAX_VSIZE'=1200000)
+doubScores <- addDoubletScores(
+    input = ArrowFiles,
+    k = 10,             #Refers to how many cells near a "pseudo-doublet" to count.
+    knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search with doublet projection.
+    LSIMethod = 1
+)
+doubScores
+
+plotPDF(plot, name = "0_doubscores_k10_UMAP_LSI1.pdf", addDOC = TRUE)
+```
+
+```{r 4_Setting up project}
+
+Sys.setenv('R_MAX_VSIZE'=1200000)
+set.seed(1)
+Differentiation_P_1 <- ArchRProject(
+  ArrowFiles = ArrowFiles, 
+  outputDirectory = "Differentiation_P_1",
+  copyArrows = FALSE
+  ) 
+#This is recommended so that if you modify the Arrow files you have an original copy for later usage.
+Differentiation_P_1
+```
+
+```{r 5_Setting up memory,include=FALSE}
+
+paste0("Memory Size = ", round(object.size(Differentiation_P_1) / 10^6, 2), "MB")
+getAvailableMatrices(Differentiation_P_1)
+```
+
+
+```{r 6_NAMES, include=FALSE}
+##these steps are not neccesaary but dooesnot harm to run 
+#access the cell names and sample names associated with each cell:
+head(Differentiation_P_1$cellNames)
+head(Differentiation_P_1$Sample)
+#access the TSS Enrichment Scores for each cell
+quantile(Differentiation_P_1$TSSEnrichment)
+#subset the project numerically, for example taking the first 100 cells 
+Differentiation_P_1[1:100, ]
+#subset the project based on certain cell names
+Differentiation_P_1[Differentiation_P_1$cellNames[1:100], ]
+```
+
+```{r plotting data1} 
+
+#retreiving column by name , such as number of unique nuclear (i.e. non-mitochondrial) fragments per cell:
+df <- getCellColData(Differentiation_P_1, select = "nFrags")
+df
+
+#performing operation of columns 
+df <- getCellColData(Differentiation_P_1, select = c("log10(nFrags)", "nFrags - 1"))
+df
+ #standard scATAC-seq metrics for quality control of individual cells
+df <- getCellColData(Differentiation_P_1, select = c("log10(nFrags)", "TSSEnrichment"))
+df
+
+
+#Number of unique nuclear fragments (log10) by the TSS enrichment score. This plot is key for identifying high quality cells. 
+plot1 <- ggPoint(
+    x = df[,1], 
+    y = df[,2], 
+    colorDensity = TRUE,
+    continuousSet = "sambaNight",
+    xlabel = "Log10 Unique Fragments",
+    ylabel = "TSS Enrichment",
+    xlim = c(log10(500), quantile(df[,1], probs = 0.99)),
+    ylim = c(0, quantile(df[,2], probs = 0.99))
+) + geom_hline(yintercept = 4, lty = "dashed") + geom_vline(xintercept = 3, lty = "dashed")
+
+plot1
+plotPDF(plot, name = "0_QC-Differentiation_TSS-vs-Frags.pdf", ArchRProj = Differentiation_P_1, addDOC = TRUE)
+
+```
+
+```{r Plotting Sample Statistics} 
+ArchRPalettes$custom <- c('D0_Ctrl' = '#FF7C70','D20_Ctrl' = '#AECDDF')
+sample_id_palette <- ArchRPalettes$custom
+plot1 <- plotGroups(
+    ArchRProj = Differentiation_P_1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    plotAs = "ridges",
+    pal = sample_id_palette
+   )
+plot1
+
+
+
+plot2 <- plotGroups(
+    ArchRProj = Differentiation_P_1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE,
+    pal = sample_id_palette
+   )
+plot2
+
+
+plot3 <- plotGroups(
+    ArchRProj = Differentiation_P_1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "log10(nFrags)",
+    plotAs = "ridges",
+    pal = sample_id_palette
+   )
+plot3
+
+
+plot4 <- plotGroups(
+    ArchRProj = Differentiation_P_1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "log10(nFrags)",
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE,
+    pal = sample_id_palette
+   )
+plot4
+plot1+plot2+plot3+plot4
+plotPDF(plot1+plot2,plot3,plot4, name = "0_QC-Sample-Statistics.pdf", ArchRProj = Differentiation_P_1, addDOC = TRUE, width = 4, height = 4)
+
+```
+
+
+```{r Plotting Sample Fragment Size Distribution and TSS Enrichment Profiles} 
+
+plot5 <- plotFragmentSizes(ArchRProj = Differentiation_P_1,pal = sample_id_palette)
+plot5
+plot6 <- plotTSSEnrichment(ArchRProj = Differentiation_P_1, pal = sample_id_palette)
+plot6
+plotPDF(plot5,plot6, name = "0_QC-Sample-FragSizes-TSSProfile.pdf", ArchRProj = Differentiation_P_1, addDOC = TRUE, width = 5, height = 5)
+saveArchRProject(ArchRProj = Differentiation_P_1, outputDirectory = "Save-Differentiation_P_1", load = FALSE)
+```
+<!-- #################################### -->
+<!--      End of Save Project 1           -->
+<!--           Filter Doublet             -->
+<!-- #################################### -->
+
+```{r filter doublet function} 
+#start fromhere now
+###RUN THIS FUNCTION before running ARCHR FILTER step in order to avoid posix.ct numeric
+filterDoublets <- function(ArchRProj = NULL, cutEnrich = 1, cutScore = -Inf, filterRatio = 1){
+
+  fn <- unclass(lsf.str(envir = asNamespace("ArchR"), all = TRUE))
+    for (i in seq_along(fn)) {
+        tryCatch({
+            eval(parse(text = paste0(fn[i], "<-ArchR:::", fn[i])))
+        }, error = function(x) {
+        })
+    }
+
+  .validInput(input = ArchRProj, name = "ArchRProj", valid = c("ArchRProj"))
+  .validInput(input = cutEnrich, name = "cutEnrich", valid = c("numeric"))
+  .validInput(input = cutScore, name = "cutScore", valid = c("numeric"))
+  .validInput(input = filterRatio, name = "filterRatio", valid = c("numeric"))
+
+  if(any(grepl("filterDoublets", names(ArchRProj@projectSummary)))){
+    stop("Already ran filterDoublets on ArchRProject! Cannot be re-ran on an ArchRProject!")
+  }
+
+  df <- getCellColData(ArchRProj, c("Sample", "DoubletEnrichment", "DoubletScore"))
+  splitDF <- split(seq_len(nrow(df)), as.character(df$Sample))
+
+  cellsFilter <- lapply(splitDF, function(y){
+
+    x <- df[y, ,drop = FALSE]
+
+    n <- nrow(x)
+
+    x <- x[order(x$DoubletEnrichment, decreasing = TRUE), ]
+    
+    if(!is.null(cutEnrich)){
+      x <- x[which(x$DoubletEnrichment >= cutEnrich), ]
+    } 
+    
+    if(!is.null(cutScore)){
+      x <- x[which(x$DoubletScore >= cutScore), ]
+    } 
+
+    if(nrow(x) > 0){
+      head(rownames(x), filterRatio * n * (n / 100000))
+    }else{
+      NULL
+    }
+
+  }) %>% unlist(use.names=FALSE)
+
+  message("Filtering ", length(cellsFilter), " cells from ArchRProject!")
+  tabRemove <- table(df[cellsFilter,]$Sample)
+  tabAll <- table(df$Sample)
+  samples <- unique(df$Sample)
+  for(i in seq_along(samples)){
+    if(!is.na(tabRemove[samples[i]])){
+      message("\t", samples[i], " : ", tabRemove[samples[i]], " of ", tabAll[samples[i]], " (", round(100 * tabRemove[samples[i]] / tabAll[samples[i]], 1),"%)")
+    }else{
+      message("\t", samples[i], " : ", 0, " of ", tabAll[samples[i]], " (0%)")
+    }
+  }
+
+  if(length(cellsFilter) > 0){
+    
+    ArchRProj@cellColData <- ArchRProj@cellColData[rownames(ArchRProj@cellColData) %ni% cellsFilter,,drop=FALSE]
+
+  }
+  
+  ArchRProj
+
+}
+saveArchRProject(ArchRProj = Differentiation_P_1, outputDirectory = "Save-Differentiation_P_1", load = FALSE)
+```
+
+
+```{r filterDoublets} 
+Differentiation_P_2 <- filterDoublets(Differentiation_P_1, filterRatio = 1)
+#Differentiation_P0 <- filterDoublets(Differentiation_P0, filterRatio = 1.0)
+#filter more cells from the ArchR Project, you would use a higher filterRatio. To see additional arguments that can be tweaked, try ?filterDoublets.
+#<!-- #################################### -->
+#<!--          #Dimensionality reduction   -->
+#<!-- #################################### -->
+
+Differentiation_P_2 <- addIterativeLSI(
+    ArchRProj = Differentiation_P_2,
+    useMatrix = "TileMatrix", 
+    name = "IterativeLSI", 
+    iterations = 10, 
+    clusterParams = list( #See Seurat::FindClusters
+       # resolution = c(0.1, 0.2, 0.3, 0.35, 0.40, 0.45, 0.5, 0.55, 0.6, 0.7, 0.8, 0.9, 1.0), 
+        resolution = c(0.5),
+        sampleCells = 10000,
+        n.start = 10),
+     
+    LSIMethod = 2,
+    varFeatures = 25000,
+    dimsToUse = 1:30,
+    force = TRUE,
+   
+    logFile = createLogFile("addIterativeLSI")
+)
+
+
+```
+
+
+```{r batch effect correction} 
+library(harmony)
+Differentiation_P_2 <- addHarmony(
+    ArchRProj = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    name = "Harmony",
+    groupBy = "Sample"
+)
+```
+
+```{r Clustering using seurat : resolution 0.6} 
+#library(uwot)
+#?addClusters
+Differentiation_P_2 <- addClusters(
+    input = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    method = "Seurat",
+    metric = "pca",
+    name = "Clusters",
+    resolution = 0.7,
+    force = TRUE
+)
+```
+
+```{r final seurat cluster treshold 0.6} 
+#HERE WE NEED TO CHOOSE THE CORRECT RESOLUTION BASED ON ABOVE
+Differentiation_P_2<- addClusters(
+    input = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    method = "Seurat",
+    name = "Clusters",
+    resolution = c(0.7),
+    force = TRUE
+)
+
+```
+
+
+```{r Confusion matrix} 
+
+Differentiation_P_2
+
+head(Differentiation_P_2$Clusters)
+table(Differentiation_P_2$Clusters)
+cM <- confusionMatrix(paste0(Differentiation_P_2$Clusters), paste0(Differentiation_P_2$Sample))
+cM
+```
+
+```{r heatmap} 
+
+library(pheatmap)
+
+cM <- cM / Matrix::rowSums(cM)
+p <- pheatmap::pheatmap(
+    mat = as.matrix(cM), 
+    color = paletteContinuous("whitePurple"), 
+    border_color = "grey"
+)
+p
+
+```
+
+```{r UMAP of Interactive LSI} 
+###ADD UMAP
+library(uwot)
+
+Differentiation_P_2 <- addUMAP(
+    ArchRProj = Differentiation_P_2, 
+    reducedDims = "IterativeLSI", 
+    name = "UMAP", 
+    nNeighbors = 4, 
+    minDist = 0.8, 
+    metric = "cosine",
+    force = TRUE
+)
+#####
+
+ArchRPalettes$custom <- c('1' = '#FF7C70','2' = '#AECDDF')
+sample_id_palette <- ArchRPalettes$custom
+#####
+p1 <- plotEmbedding(ArchRProj = Differentiation_P_2, colorBy = "cellColData", name = "Sample", embedding = "UMAP",pal = sample_id_palette,rastr = FALSE,size=0.3)
+p1
+######
+
+ArchRPalettes$custom <- c('1' = '#AECDDF','2' = '#FF7C70')
+sample_id_palette <- ArchRPalettes$custom
+ArchRPalettes$custom <- c('1' = '#2A7185','2' = '#A64027', '3' = '#FBDF72', '4' = '#60824F', '5' = '#9CDFF0', '6' = '#CAB2D6', '7' = '#A5BE6A', '8' = '#A2A475',  '9' = '#2F8AC4')
+Atac_cluster_palette <- ArchRPalettes$custom
+######
+p2 <- plotEmbedding(ArchRProj = Differentiation_P_2, colorBy = "cellColData", name = "Clusters", embedding = "UMAP",pal = Atac_cluster_palette,rastr = FALSE,size=0.3)
+p2
+ggAlignPlots(p1, p2, type = "h")
+plotPDF(p1,p2, name = "1_Plot-UMAP1-Sample-Clusters.pdf", ArchRProj = Differentiation_P_1, addDOC = TRUE, width = 11, height = 11,plotList = NULL)
+
+
+```
+
+
+```{r umap using COSINE harmony: DEFAULT } 
+library(umap)
+#library(ArchR)
+##cosine metric workes well
+
+Differentiation_P_2 <- addUMAP(
+    ArchRProj = Differentiation_P_2, 
+    reducedDims = "Harmony", 
+    name = "UMAPHarmony", 
+    nNeighbors = 8, 
+    minDist = 0.2, 
+    metric = "cosine",
+    force = TRUE
+)
+p3 <- plotEmbedding(ArchRProj = Differentiation_P_2, colorBy = "cellColData", name = "Sample", embedding = "UMAPHarmony",pal = sample_id_palette, size=0.3,rastr=FALSE)
+
+p4 <- plotEmbedding(ArchRProj = Differentiation_P_2, colorBy = "cellColData", name = "Clusters", embedding = "UMAPHarmony",pal = Atac_cluster_palette,size=0.3,rastr=FALSE)
+
+ggAlignPlots(p3, p4, type = "h")
+plotPDF(p1,p2,p3,p4, name = "1_Plot-UMAP2Harmony-Sample-Clusters_n4_dist0.8_.pdf", ArchRProj = Differentiation_P_1, addDOC = TRUE, width = 11, height = 11)
+
+```
+
+```{r marker ID for ATAC,include=FALSE} 
+#geneScoreMatrix
+markersGS <- getMarkerFeatures(
+   ArchRProj = Differentiation_P_2, 
+   useMatrix = "GeneScoreMatrix", 
+   groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+markerListGS <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC >= 0.1")
+Cluster_marker_list_GS <- write.csv(markerListGS, "1_ATAC_cluster_marker_list_GS.csv", sep = "\t")
+markerListGS
+```
+
+```{r marker list heatmap,include=FALSE}
+
+
+markerGenes  <- c('SOX2','IRX2','RAX','LIX1','PAX6','HESX1','HES5','LRRC75A','FOXH1','CDH1','TDGF1','DNMT3B','EPCAM','PODXL','ID1','POU5F1','GAL','FOXG1','DPPA4','NR6A1','CD24','LRRC75A','ZIC2','FGF8','DLX6','DLX5','BMP4','GRIA1','SIX6','NKX2-1','NEUROG1','DLL1','ASCL1','NHLH1','NEUROD1','FEZF2','L1CAM','INA','GRIA2','GNRH1','INSM1','ELAVL4','ISL1','TH','DCX','TAGLN3','SCG2','ELAVL3','PCSK2','MAP6','HES6','DLL3','TLX3','NEUROD4','SYP','STMN2','POU2F2','TUBB3','SNAP25','NSG2','GAP43','NEFM','NEFL','RET','NTRK3','RELN','NTRK1','DLX2','DLX1','GAD1','ARX','SOX3','SYT4','SPARCL1','OTX2','LMO1','FABP7','DCT','VEPH1','PRRX1','CDK6','GNG11','HES1','TYMS','PCNA','CDK1','DLX6-AS1','TUBB4B','SELENOP','ID2','CRABP1','APOE','LDHA','FZD5','KRT18','FGF17','ASCL1','REST','GNRH1','GAD1','GAD2','ARX','CDKN1C','TAGLN','NANOG','KIF15','SIX3','PHC1','TUBB4A','NRXN1','CDH7','ROBO1','NCAM1','INA','NEFL','NEFM','TUBB3','TIBB4B','FN1','CDH2','NES','VIM','ACTG1','THY-1','EPHA1','CDH3','PAMBR1','RELN','SEMA4A','SEMA4D','TH')
+ArchRPalettes$custom <- c('1' = '#B60A1C','2' = '#AECDDF')
+customcolor_heatmaps <- ArchRPalettes$custom
+
+
+heatmapGS <- markerHeatmap(
+  seMarker = markersGS, 
+  cutOff = "FDR <= 0.01 & Log2FC >= 0.1", 
+  labelMarkers = markerGenes,
+  transpose = TRUE,
+  
+)
+
+ComplexHeatmap::draw(heatmapGS, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapGS, name = "1_RNAseq-markers_GeneScores-Marker_list-Heatmap-0.1-C", width = 8, height = 6, ArchRProj = Differentiation_P_2, addDOC = TRUE)
+
+
+p2 <- lapply(p, function(x){
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+)
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+
+
+markerGenes_atac  <- c('LOC105369438','LOC101927668','SCGB3A2','L1TD1','LNCPRESS2','RYR2','ELL2','ZFP42','TRG-AS1','LINC00678','RFTN2','ASTN2','PVT1','GPC5','UST-AS1','LNCPRESS2','TPRG1','RAB17','HDAC2-AS2','TRG-AS1','C3','SH2D3A','CLDN9','KLK9','PPP1R14A','SMIM24','KLK8','ARHGAP45','SPINT2','DPRX','VENTX','KLK8','IRX4','ARHGAP45','LINC01962','FAM83H','KLK9','MMP23A','TMEM102','CDX2','MIR2355','PTPRN2','GSE1','LINC01315','CCDC33','MAP6','MSI2','INSM1','MIR7158','EPHA4','FZD8','RBM5-AS1','NSF','MIR770','LOC101927557','MIR2392','PRDM16','PRTG','MAP1B','NSFP1','MSI2','FAM204A','MIR99AHG','CDH2','PCDH9','PLEKHG1','ZFHX4','SLIT2','GLI3','MAP1B','GLIS3','FIGN','FIGN','AATF','LOC101927557','AKAP6','MIR770','MBIP','MSI2','PRTG','NPAS3','PRDM16','SOX6')
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = markersGS, 
+  cutOff = "FDR <= 0.01 & Log2FC >= 0.1", 
+  labelMarkers = markerGenes_atac,
+  transpose = TRUE,
+  
+)
+
+ComplexHeatmap::draw(heatmapGS, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapGS, name = "1_ATACmarkers_GeneScores-Marker_list-Heatmap-0.1-C", width = 8, height = 6, ArchRProj = Differentiation_P_2, addDOC = TRUE)
+
+
+p2 <- lapply(p, function(x){
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+)
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+
+Transcription_Factors <- c('ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2','ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2')
+
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = markersGS, 
+  cutOff = "FDR <= 0.01 & Log2FC >= 0.1", 
+  labelMarkers = Transcription_Factors,
+  transpose = TRUE,
+  
+)
+
+ComplexHeatmap::draw(heatmapGS, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapGS, name = "1_Transcription factors_markers_GeneScores-Marker_list-Heatmap-0.1-C", width = 8, height = 6, ArchRProj = Differentiation_P_2, addDOC = TRUE)
+
+
+p2 <- lapply(p, function(x){
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+)
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+markerList_marker_genes <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC >= 0.1")
+Cluster_marker_list_PM <- write.csv(markerListGS, "1_ATAC_genescores_plot_marker_genes_TopClusterMarkers_.csv", sep = "\t")
+
+```
+
+```{r vizualise marker genes on an embedding,include=FALSE} 
+#make UMAP plots of marker genes
+
+markerGenes_atac  <- c('LOC105369438','LOC101927668','SCGB3A2','L1TD1','LNCPRESS2','RYR2','ELL2','ZFP42','TRG-AS1','LINC00678','RFTN2','ASTN2','PVT1','GPC5','UST-AS1','LNCPRESS2','TPRG1','RAB17','HDAC2-AS2','TRG-AS1','C3','SH2D3A','CLDN9','KLK9','PPP1R14A','SMIM24','KLK8','ARHGAP45','SPINT2','DPRX','VENTX','KLK8','IRX4','ARHGAP45','LINC01962','FAM83H','KLK9','MMP23A','TMEM102','CDX2','MIR2355','PTPRN2','GSE1','LINC01315','CCDC33','MAP6','MSI2','INSM1','MIR7158','EPHA4','FZD8','RBM5-AS1','NSF','MIR770','LOC101927557','MIR2392','PRDM16','PRTG','MAP1B','NSFP1','MSI2','FAM204A','MIR99AHG','CDH2','PCDH9','PLEKHG1','ZFHX4','SLIT2','GLI3','MAP1B','GLIS3','FIGN','FIGN','AATF','LOC101927557','AKAP6','MIR770','MBIP','MSI2','PRTG','NPAS3','PRDM16','SOX6')
+#markerGenes_atac_test  <- c('LOC105369438','LOC101927668','SCGB3A2','L1TD1','LNCPRESS2')
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes_atac, 
+    embedding = "UMAP",
+    quantCut = c(0.01, 0.95),
+    size=0.3,
+    imputeWeights = NULL
+)
+
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(plotList = p, 
+    name = "1_Plot-UMAP-Marker-Genes-LSIumap-TopMarkersAND_atac_Markers-Imputation.pdf", 
+    ArchRProj = Differentiation_P_1, 
+    addDOC = TRUE, width = 5, height = 5)
+
+
+markerGenes  <- c('SOX2','IRX2','RAX','LIX1','PAX6','HESX1','HES5','LRRC75A','FOXH1','CDH1','TDGF1','DNMT3B','EPCAM','PODXL','ID1','POU5F1','GAL','FOXG1','DPPA4','NR6A1','CD24','LRRC75A','ZIC2','FGF8','DLX6','DLX5','BMP4','GRIA1','SIX6','NKX2-1','NEUROG1','DLL1','ASCL1','NHLH1','NEUROD1','FEZF2','L1CAM','INA','GRIA2','GNRH1','INSM1','ELAVL4','ISL1','TH','DCX','TAGLN3','SCG2','ELAVL3','PCSK2','MAP6','HES6','DLL3','TLX3','NEUROD4','SYP','STMN2','POU2F2','TUBB3','SNAP25','NSG2','GAP43','NEFM','NEFL','RET','NTRK3','RELN','NTRK1','DLX2','DLX1','GAD1','ARX','SOX3','SYT4','SPARCL1','OTX2','LMO1','FABP7','DCT','VEPH1','PRRX1','CDK6','GNG11','HES1','TYMS','PCNA','CDK1','DLX6-AS1','TUBB4B','SELENOP','ID2','CRABP1','APOE','LDHA','FZD5','KRT18','FGF17','ASCL1','REST','GNRH1','GAD1','GAD2','ARX','CDKN1C','TAGLN','NANOG','KIF15','SIX3','PHC1','TUBB4A','NRXN1','CDH7','ROBO1','NCAM1','INA','NEFL','NEFM','TUBB3','FN1','CDH2','NES','VIM','ACTG1','EPHA1','CDH3','RELN','SEMA4A','SEMA4D','TH')
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAP",
+    quantCut = c(0.01, 0.95),
+    size=0.3,
+    imputeWeights = NULL
+)
+
+p$POU5F1
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(plotList = p, 
+    name = "1_Plot-UMAP-Marker-Genes-LSIumap-TopMarkersAND_rna_Markers-Imputation.pdf", 
+    ArchRProj = Differentiation_P_2, 
+    addDOC = TRUE, width = 5, height = 5)
+
+Transcription_Factors <- c('ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2','ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2')
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    colorBy = "GeneScoreMatrix", 
+    name = Transcription_Factors, 
+    embedding = "UMAP",
+    quantCut = c(0.01, 0.95),
+    size=0.3,
+    imputeWeights = NULL
+)
+
+p$POU5F1
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(plotList = p, 
+    name = "1_Plot-UMAP-Marker-Genes-LSIumap-TopMarkersAND_Transcriptionfactors-Imputation.pdf", 
+    ArchRProj = Differentiation_P_2, 
+    addDOC = TRUE, width = 5, height = 5)
+
+```
+
+```{r marker gene computation with ,include=FALSE} 
+#make UMAP plots of marker genes
+
+Differentiation_P_2 <- addImputeWeights(Differentiation_P_2)
+
+markerGenes_atac  <- c('LOC105369438','LOC101927668','SCGB3A2','L1TD1','LNCPRESS2','RYR2','ELL2','ZFP42','TRG-AS1','LINC00678','RFTN2','ASTN2','PVT1','GPC5','UST-AS1','LNCPRESS2','TPRG1','RAB17','HDAC2-AS2','TRG-AS1','C3','SH2D3A','CLDN9','KLK9','PPP1R14A','SMIM24','KLK8','ARHGAP45','SPINT2','DPRX','VENTX','KLK8','IRX4','ARHGAP45','LINC01962','FAM83H','KLK9','MMP23A','TMEM102','CDX2','MIR2355','PTPRN2','GSE1','LINC01315','CCDC33','MAP6','MSI2','INSM1','MIR7158','EPHA4','FZD8','RBM5-AS1','NSF','MIR770','LOC101927557','MIR2392','PRDM16','PRTG','MAP1B','NSFP1','MSI2','FAM204A','MIR99AHG','CDH2','PCDH9','PLEKHG1','ZFHX4','SLIT2','GLI3','MAP1B','GLIS3','FIGN','FIGN','AATF','LOC101927557','AKAP6','MIR770','MBIP','MSI2','PRTG','NPAS3','PRDM16','SOX6')
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes_atac, 
+    embedding = "UMAP",
+    size=0.3,
+    imputeWeights = getImputeWeights(Differentiation_P_2)
+)
+
+
+p$SERPINB2
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+       axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(plotList = p, 
+    name = "1_Plot-UMAP-ATAC_Marker-Genes-MAGIC-TopMarkersANDatacMarkers-Imputation.pdf", 
+    ArchRProj = Differentiation_P_2, 
+    addDOC = TRUE, width = 5, height = 5)
+
+markerGenes  <- c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAP",
+    size=0.3,
+    imputeWeights = getImputeWeights(Differentiation_P_2)
+)
+
+
+p$SERPINB2
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+       axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(plotList = p, 
+    name = "1_Plot-UMAP-RNA_Marker-Genes-MAGIC-TopMarkersANDSCRNAMarkers-Imputation.pdf", 
+    ArchRProj = Differentiation_P_2, 
+    addDOC = TRUE, width = 5, height = 5)
+
+
+
+Transcription_Factors <- c('ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2','ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2')
+
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_2,
+    reducedDims = "IterativeLSI",
+    colorBy = "GeneScoreMatrix", 
+    name = Transcription_Factors, 
+    embedding = "UMAP",
+    size=0.3,
+    imputeWeights = getImputeWeights(Differentiation_P_2)
+)
+
+
+p$SERPINB2
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+       axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(plotList = p, 
+    name = "1_Plot-UMAP-RNA_Marker-Genes-MAGIC-TopMarkersANDTRANSCRIOTIONFACTORS-Imputation.pdf", 
+    ArchRProj = Differentiation_P_2, 
+    addDOC = TRUE, width = 5, height = 5)
+
+```
+
+
+
+```{r Track blotting with ArchR Browser,include=FALSE} 
+
+
+ArchRPalettes$custom <- c('C1' = '#2A7185','C2' = '#A64027', 'C3' = '#FBDF72', 'C4' = '#60824F', 'C5' = '#9CDFF0', 'C6' = '#CAB2D6', 'C7' = '#A5BE6A', 'C8' = '#A2A475',  'C9' = '#2F8AC4')
+Atac_cluster_palette <- ArchRPalettes$custom
+
+
+markerGenes  <- c('LOC105369438','LOC101927668','SCGB3A2','L1TD1','LNCPRESS2','RYR2','ELL2','ZFP42','TRG-AS1','LINC00678','RFTN2','ASTN2','PVT1','GPC5','UST-AS1','LNCPRESS2','TPRG1','RAB17','HDAC2-AS2','TRG-AS1','C3','SH2D3A','CLDN9','KLK9','PPP1R14A','SMIM24','KLK8','ARHGAP45','SPINT2','DPRX','VENTX','KLK8','IRX4','ARHGAP45','LINC01962','FAM83H','KLK9','MMP23A','TMEM102','CDX2','MIR2355','PTPRN2','GSE1','LINC01315','CCDC33','MAP6','MSI2','INSM1','MIR7158','EPHA4','FZD8','RBM5-AS1','NSF','MIR770','LOC101927557','MIR2392','PRDM16','PRTG','MAP1B','NSFP1','MSI2','FAM204A','MIR99AHG','CDH2','PCDH9','PLEKHG1','ZFHX4','SLIT2','GLI3','MAP1B','GLIS3','FIGN','FIGN','AATF','LOC101927557','AKAP6','MIR770','MBIP','MSI2','PRTG','NPAS3','PRDM16','SOX6')
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_2, 
+    groupBy = "Clusters", 
+    geneSymbol = markerGenes, 
+    upstream = 50000,
+    downstream = 50000,
+    pal=Atac_cluster_palette
+)
+p
+
+grid::grid.newpage()
+plotPDF(plotList = p, 
+    name = "1_Plot-Tracks-Marker-Genes-Cluster-specific-markers-from-ATAC.pdf", 
+   ArchRProj = Differentiation_P_2, 
+    addDOC = TRUE, width = 5, height = 5)
+markerGenes  <- c('SOX2','IRX2','RAX','LIX1','PAX6','HESX1','HES5','LRRC75A','FOXH1','CDH1','TDGF1','DNMT3B','EPCAM','PODXL','ID1','POU5F1','GAL','FOXG1','DPPA4','NR6A1','CD24','LRRC75A','ZIC2','FGF8','DLX6','DLX5','BMP4','GRIA1','SIX6','NKX2-1','NEUROG1','DLL1','ASCL1','NHLH1','NEUROD1','FEZF2','L1CAM','INA','GRIA2','GNRH1','INSM1','ELAVL4','ISL1','TH','DCX','TAGLN3','SCG2','ELAVL3','PCSK2','MAP6','HES6','DLL3','TLX3','NEUROD4','SYP','STMN2','POU2F2','TUBB3','SNAP25','NSG2','GAP43','NEFM','NEFL','RET','NTRK3','RELN','NTRK1','DLX2','DLX1','GAD1','ARX','SOX3','SYT4','SPARCL1','OTX2','LMO1','FABP7','DCT','VEPH1','PRRX1','CDK6','GNG11','HES1','TYMS','PCNA','CDK1','DLX6-AS1','TUBB4B','SELENOP','ID2','CRABP1','APOE','LDHA','FZD5','KRT18','FGF17','ASCL1','REST','GNRH1','GAD1','GAD2','ARX','CDKN1C','TAGLN','NANOG','KIF15','SIX3','PHC1','TUBB4A','NRXN1','CDH7','ROBO1','NCAM1','INA','NEFL','NEFM','TUBB3','FN1','CDH2','NES','VIM','ACTG1','EPHA1','CDH3','RELN','SEMA4A','SEMA4D','TH')
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_2, 
+    groupBy = "Clusters", 
+    geneSymbol = markerGenes, 
+    upstream = 50000,
+    downstream = 50000,
+    pal=Atac_cluster_palette 
+)
+grid::grid.newpage()
+plotPDF(plotList = p, 
+    name = "1_Plot-Tracks-Marker-Genes-Cluster-specific-markers-from-scRNA.pdf", 
+   ArchRProj = Differentiation_P_1, 
+    addDOC = TRUE, width = 5, height = 5)
+
+
+Transcription_Factors <- c('ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2','ARX','ASCL1','DLX1','DLX2','DLX5','DLX6','EMX2','FOXD3','FOXG1','FOXH1','HES1','HES5','HES6','HESX1','ID1','ID2','INSM1','IRX2','ISL1','MYC','NANOG','NEUROD1','NEUROD4','NEUROG1','NHLH1','NKX2-1','NR6A1','OTX2','PAX6','POU2F2','POU3F1','POU5F1','PRRX1','RAX','REST','SIX3','SIX6','SOX11','SOX21','SOX2','SOX3','TLX3','ZIC2','LHX2','NFIB','POU3F3','SOX5','ZIC4','ZEB1','NR2F2')
+
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_2, 
+    groupBy = "Clusters", 
+    geneSymbol = Transcription_Factors, 
+    upstream = 50000,
+    downstream = 50000,
+    pal=Atac_cluster_palette 
+)
+grid::grid.newpage()
+plotPDF(plotList = p, 
+    name = "1_Plot-Tracks-Marker-Genes-Cluster-specific-markers_Transcription_factors.pdf", 
+   ArchRProj = Differentiation_P_2, 
+    addDOC = TRUE, width = 5, height = 5)
+
+```
+
+
+```{r Browser and shiny} 
+#peak matrix file
+
+#ArchRBrowser(Differentiation_P_3)
+
+saveRDS(Differentiation_P_2, file = "ARCHR_PART1_FINAL_before_integration_RNA.rds")
+
+```
+
+
+```{r RNASEQ integration unconstrained} 
+
+##ARIAL NOT IN FONT DATABASE- CHECK BEFORE RUNNING THIS STEP
+#Differentiation_P_3 <- "ARCHR_PART1_FINAL_before_integration_RNA.rds"
+#library(ArchR)
+# load RDS FILE OF THE scRNA SEQ
+set.seed(1)
+Sys.setenv('R_MAX_VSIZE'=1200000)
+addArchRThreads(threads=16)
+
+library(SingleCellExperiment)
+seRNA <- readRDS("~/Dropbox (UiO)/Paracetamol_shared/SINGLE_CELL_ANALYSIS/AGGREGATED_ANALYSIS/DIFFERENTIATION/FINAL_MERGED_ANALYSIS_D0_D20_res0.5/COHERENT_ALL_EndofPipe_Final_rnaobjects.qcFilt.rds")
+seRNA
+# Assign new IDs based on scCatch annotation results - Using Seurat Markers
+#renumbered clusters from 0to13
+library(ggplot2)
+library(tidyverse)
+library(ggrepel)
+library(ggthemes)
+library(dplyr)
+
+DimPlot(seRNA, reduction = "umap", label = TRUE,group.by = "ident", pt.size = 0.3,cols = c('5' = '#8175AA', '1' = '#C3CE3D', '7' = '#FFC966', '2' = '#023858','10' = '#8CC2CA','3' = '#DAB6AF', '4' = '#CCCCCC', '9' = '#59A14F', '6' = '#B15928', '11' = '#C0D6E4', '8' = '#FFD700','12' = '#F28E2B','13' = '#A3ACB9'))+theme(text=element_text(size=12))
+dev.copy(pdf,paste0("up_13.FINAL_original_LABELS_FILT.UMAP_final.pdf"), width=8, height=6, paper='special')
+dev.off()                                                                                          
+
+###NEW FROM SLACK ## RE SUGGESTED feb62021
+
+fil.cluster.ids <- c("R7","R1","R9","R0","R12","R2","R3","R11","R8","R13","R10","R14","R15")
+seRNA$original_seurat_clusters
+Idents(seRNA) <- "seurat_clusters"
+names(fil.cluster.ids) <- levels(seRNA)
+seRNA <- RenameIdents(seRNA, fil.cluster.ids)
+DimPlot(seRNA, reduction = "umap", label = TRUE,group.by = "ident", pt.size = 0.5,cols = c('R7' = '#8175AA', 'R1' = '#C3CE3D', 'R9' = '#FFC966', 'R0' = '#CCCCCC','R12' = '#8CC2CA','R2' = '#DAB6AF', 'R3' = '#023858', 'R11' = '#59A14F', 'R8' = '#B15928', 'R13' = '#C0D6E4', 'R10' = '#FFD700','R14' = '#F28E2B','R15' = '#A3ACB9'))
+dev.copy(pdf,paste0(currentjob,"coherent_13.NEW_RENAME_NUMBERS_FILT.UMAP_final.pdf"), width=8, height=6, paper='special')
+dev.off()
+
+seRNA_1 = Seurat::as.SingleCellExperiment(seRNA)
+#table(colData(seRNA)$BioClassification)
+seRNA_1$ident
+#The metadata contains a column called Seurat_clusters or SNN_res_0.5 which contains the cell type
+colnames(colData(seRNA_1))
+table(colData(seRNA_1)$ident)
+  #integrate scATAC-seq with scRNA-seq
+Differentiation_P_2<- addGeneIntegrationMatrix(
+  ArchRProj = Differentiation_P_2, 
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "GeneIntegrationMatrix",
+  reducedDims = "IterativeLSI",
+  seRNA = seRNA_1,
+  addToArrow = FALSE,
+  groupRNA = "ident",
+  nameCell = "predictedCell_Un",
+  nameGroup = "predictedGroup_Un",
+  nameScore = "predictedScore_Un"
+)
+rm(seRNA)
+```
+
+```{r Confusion matrix for assignment of clusters } 
+###Confusion matrix for assigning clusters_CONSTRAINED INTEGRATION
+
+Sys.setenv('R_MAX_VSIZE'=1200000)
+set.seed(1)
+cM <- as.matrix(confusionMatrix(Differentiation_P_2$Clusters, Differentiation_P_2$predictedGroup_Un))
+preClust1 <- colnames(cM)[apply(cM, 1 , which.max)]
+preClust1
+cbind(preClust1, rownames(cM)) 
+#Assignments
+unique(unique(Differentiation_P_2$predictedGroup_Un))
+preClust1
+```
+
+```{r  string-based representation of clusters for downstream integration} 
+#we will create a confusionMatrix that looks at the intersection of Clusters and predictedGroup_Un which contains the cell types as identified by scRNA-seq.
+
+
+
+c1 <- paste0(c(paste0("R0"),"R2","R3"), collapse="|")
+c1
+
+cNon1<- paste0(c(paste0("R9"),"R7","R12"), collapse="|")
+cNon1
+```
+
+```{r  Assign scATAC to these categories for downstream integration} 
+#
+
+clust1 <- rownames(cM)[grep(c1, preClust1)]
+clust1
+
+clustNon1<- rownames(cM)[grep(cNon1, preClust1)]
+clustNon1
+
+
+#RNA get cells in these categories
+rna1  <- colnames(seRNA_1)[grep(c1, colData(seRNA_1)$ident)]
+head(rna1)
+
+rnaNon1 <- colnames(seRNA_1)[grep(cNon1, colData(seRNA_1)$ident)]
+head(rnaNon1)
+
+```
+
+```{r marker ID for ATAC} 
+
+Sys.setenv('R_MAX_VSIZE'=1200000)
+set.seed(1)
+
+
+groupList <- SimpleList(
+    cluster1 = SimpleList(
+        ATAC = Differentiation_P_2$cellNames[Differentiation_P_2$Clusters %in% clust1],
+        RNA = rna1
+    ),
+     NonFN1 = SimpleList(
+        ATAC = Differentiation_P_2$cellNames[Differentiation_P_2$Clusters %in% clustNon1],
+        RNA = rnaNon1
+     )
+)
+
+Differentiation_P_2 <- addGeneIntegrationMatrix(
+    ArchRProj = Differentiation_P_2, 
+    useMatrix = "GeneScoreMatrix",
+    matrixName = "GeneIntegrationMatrix",
+    reducedDims = "IterativeLSI",
+    seRNA = seRNA_1,
+    addToArrow = FALSE, 
+    groupList = groupList,
+    groupRNA = "ident",
+    nameCell = "predictedCell_Co",
+    nameGroup = "predictedGroup_Co",
+    nameScore = "predictedScore_Co"
+)
+```
+
+
+```{r Plot UMAP of Unconstrained p1 and constrained p2 integration ident}
+
+ArchRPalettes$custom <-c( 'R0' = '#CCCCCC','R1'= '#C3CE3D', 'R2'='#DAB6AF','R3' = '#023858','R7' = '#8175AA','R8' ='#B15928','R9' = '#FFC966','R10' = '#FFD700','R11' = '#59A14F','R12' = '#8CC2CA','R13' = '#C0D6E4','R14' = '#F28E2B','R15' = '#A3ACB9')
+unconstrained_palette <- ArchRPalettes$custom
+
+p1 <- plotEmbedding(
+   Differentiation_P_2,
+    embedding = "UMAP",
+    reducedDims = "IterativeLSI",
+    colorBy = "cellColData", 
+    name = "predictedGroup_Un", 
+    pal = unconstrained_palette,
+    rastr = FALSE,
+    size=0.3,
+   
+)
+p1
+
+
+ArchRPalettes$custom <-c('R0' = '#CCCCCC','R2'= '#DAB6AF', 'R3'='#023858','R7' = '#8175AA','R9' = '#FFC966','R12' ='#8CC2CA')
+constrained_palette <- ArchRPalettes$custom
+
+p2 <- plotEmbedding(
+     Differentiation_P_2, 
+    reducedDims = "IterativeLSI",
+    colorBy = "cellColData", 
+    name = "predictedGroup_Co", 
+    pal = constrained_palette,
+    rastr = FALSE,
+    size=0.3
+)
+p2
+plotPDF(p1,p2, name = "2_Plot-UMAP-unconstrained-constrained-RNA-Integration_pal_MyChoice_Co3_rmNonSignSignatures.pdf", ArchRProj =  Differentiation_P_2, addDOC = TRUE, width = 5, height = 5)
+
+saveArchRProject(ArchRProj = Differentiation_P_2, outputDirectory = "Save-Differentiation_P_2", load = FALSE)
+```
+<!-- #################################### -->
+<!--      End of Save DIFF_P_2
+<!--    Pseudo-scRNA-seq profile for scATACseq cell
+<!-- #################################### -->
+```{r can re-run the integration with addToArrow true_will_rewrite_arrowfiles}
+
+Sys.setenv('R_MAX_VSIZE'=1200000)
+set.seed(1)
+
+Differentiation_P_3 <- addGeneIntegrationMatrix(
+    ArchRProj = Differentiation_P_2, 
+    useMatrix = "GeneScoreMatrix",
+    matrixName = "GeneIntegrationMatrix",
+    reducedDims = "IterativeLSI",
+    seRNA = seRNA_1,
+    addToArrow = TRUE,
+    force= TRUE,
+    groupList = groupList,
+    groupRNA = "ident",
+    nameCell = "predictedCell",
+    nameGroup = "predictedGroup",
+    nameScore = "predictedScore"
+)
+getAvailableMatrices(Differentiation_P_2)
+
+Differentiation_P_2 <- addImputeWeights(Differentiation_P_2)
+
+
+
+```
+
+
+```{r  UMAP plots overlayed with the gene expression p1 and gene score p2 values, include=FALSE} 
+library(hexbin)
+markerGenes  <- c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+
+
+p1 <- plotEmbedding(
+    ArchRProj = Differentiation_P_3, 
+    colorBy = "GeneIntegrationMatrix", 
+    name = markerGenes, 
+    continuousSet = "horizonExtra",
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(Differentiation_P_2
+    )
+)
+p1
+p2 <- plotEmbedding(
+    ArchRProj = Differentiation_P_3, 
+    colorBy = "GeneScoreMatrix", 
+    continuousSet = "horizonExtra",
+    name = markerGenes, 
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(Differentiation_P_2)
+)
+
+p1c <- lapply(p1, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+p2c <- lapply(p2, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p1c))
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2c))
+
+plotPDF(plotList = p1, 
+    name = "2_Plot-UMAP-Marker-Feature-Genes-RNA-W-Imputation_rna_markers_constrained.pdf", 
+    ArchRProj = Differentiation_P_3, 
+    addDOC = TRUE, width = 5, height = 5)
+
+
+markerGenes <-c('SCGB3A2','L1TD1','LNCPRESS2','RYR2','ELL2','ZFP42','TRG-AS1','LINC00678','RFTN2','ASTN2','PVT1','GPC5','LNCPRESS2','TPRG1','RAB17','HDAC2-AS2','TRG-AS1','C3','SH2D3A','CLDN9','PPP1R14A','SMIM24','KLK8','ARHGAP45','SPINT2','VENTX','KLK8','IRX4','ARHGAP45','FAM83H','TMEM102','PTPRN2','GSE1','LINC01315','CCDC33','MAP6','MSI2','INSM1','EPHA4','FZD8','RBM5-AS1','NSF','PRDM16','PRTG','MAP1B','MSI2','FAM204A','MIR99AHG','CDH2','PCDH9','PLEKHG1','ZFHX4','SLIT2','GLI3','MAP1B','GLIS3','FIGN','FIGN','AATF','AKAP6','MBIP','MSI2','PRTG','NPAS3','PRDM16','SOX6')
+
+p1 <- plotEmbedding(
+    ArchRProj = Differentiation_P_3, 
+    colorBy = "GeneIntegrationMatrix", 
+    name = markerGenes, 
+    continuousSet = "horizonExtra",
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(Differentiation_P_2
+                            )
+)
+
+
+p2 <- plotEmbedding(
+    ArchRProj = Differentiation_P_3, 
+    colorBy = "GeneScoreMatrix", 
+    continuousSet = "horizonExtra",
+    name = markerGenes, 
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(Differentiation_P_2)
+)
+
+p1c <- lapply(p1, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+p2c <- lapply(p2, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p1c))
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2c))
+
+plotPDF(plotList = p1, 
+    name = "2_Plot-UMAP-Marker-Feature-Genes-RNA-W-Imputation_ATAC_markers_constrained.pdf", 
+    ArchRProj = Differentiation_P_3, 
+    addDOC = TRUE, width = 5, height = 5)
+
+```
+
+```{r Labeling scATAC-seq clusters with scRNA-seq information} 
+#??
+
+cM <- confusionMatrix(Differentiation_P_2$Clusters, Differentiation_P_3$predictedGroup_Co)
+labelOld <- rownames(cM)
+labelOld
+
+labelNew <- colnames(cM)[apply(cM, 1, which.max)]
+labelNew
+
+remapClust <- c(
+  "A1" = "R0",
+  "A2" = "R0",
+  "A3" = "R2", 
+  "A4" = "R0", 
+  "A5" = "R12", 
+  "A6" = "R9",
+  "A7" = "R7",
+  "A8" = "R7",
+  "A9" = "R7"
+)
+remapClust <- remapClust[names(remapClust) %in% labelNew]
+
+labelNew2 <- mapLabels(labelNew, oldLabels = names(remapClust), newLabels = remapClust)
+labelNew2
+
+Differentiation_P_3$Clusters2 <- mapLabels(Differentiation_P_3$Clusters, newLabels = labelNew2, oldLabels = labelOld)
+
+ArchRPalettes$custom_int <-c( '1' = '#CCCCCC','2'= '#DAB6AF', '3'='#8175AA','4' = '#FFC966','5' = '#8CC2CA')
+
+#ArchRPalettes$customint <- c('R1' = '#C3CE3D', 'R7' = '#8175AA', 'R2' = '#DAB6AF','R10' = '#8CC2CA','R3' = '#023858', 'R9' = '#59A14F', 'R6' = '#B15928', 'R11' = '#C0D6E4', 'R8' = '#FFD700','R12' = '#8CC2CA','R13' = '#A3ACB9')
+MyChoice_int <- ArchRPalettes$custom_int
+
+
+p1 <- plotEmbedding(
+    Differentiation_P_3, 
+    colorBy = "cellColData", 
+    name = "Clusters2", 
+    pal = MyChoice_int
+)
+
+p1
+
+plotPDF(p1, name = "2_Plot-UMAP-constrained-final-names-Clusters.pdf", ArchRProj = Differentiation_P_3, addDOC = TRUE, width = 5, height = 5)
+
+saveArchRProject(ArchRProj = Differentiation_P_3, outputDirectory = "Save-Differentiation_P_3", load = FALSE)
+library(ArchR)
+
+```
+<!-- #################################### -->
+<!--    END OF SAVE-PROJECT3        
+<!--        Making Pseudo-bulk Replicates -->
+<!-- #################################### -->
+
+
+
+```{r making pseudo bulk replicates for downstream analysis} 
+#peak matrix file
+
+Differentiation_P_4 <- addGroupCoverages(ArchRProj = Differentiation_P_3, groupBy = "Clusters2")
+
+#saveRDS(Differentiation_P_3, file = "ARCHR_PART2_FINAL_before_MACS2_peak_calling.rds")
+
+```
+
+```{r calling peaks with MACS2} 
+
+Sys.setenv('R_MAX_VSIZE'=1200000)
+set.seed(1)
+addArchRThreads(threads = 1)
+#INstall macs2 using pip
+#pathToMacs2 <- findMacs2()
+#library(ArchR)
+#pathToMacs2 <- findMacs2("/Users/ankushs/MACS2/bin/macs2")
+#if block does not work go to terminal
+#step1_go to terminal
+#step2_ cd /Users/ankushs/
+#step3_ source MACS2/bin/activate
+#we made virtual environment on python 3.7
+# have to install macs2 on system and give path 
+Differentiation_P_4 <- addReproduciblePeakSet(
+    ArchRProj = Differentiation_P_4, 
+    groupBy = "Clusters2", 
+    pathToMacs2 = "/Users/ankushs/MACS2/bin/macs2"
+)
+
+getPeakSet(Differentiation_P_4)
+
+
+
+```
+
+```{r peakmatrix} 
+saveArchRProject(ArchRProj = Differentiation_P_4, outputDirectory = "Save-Differentiation_P_4", load = FALSE)
+```
+
+<!-- #################################### -->
+<!--        END OF SAVE PROJECT4          -->
+<!--     MARKER, MOTIFS TRAJECTORIES      -->
+<!-- #################################### -->
+
+
+```{r ID marker peaks} 
+#Differentiation_P_3<-readRDS("ARCHR_PART3_FINAL_after_MACS2_peak_calling.rds")
+
+Differentiation_P_4 <- loadArchRProject("Save-Differentiation_P_4/")
+
+
+Differentiation_P_5 <- addPeakMatrix(Differentiation_P_4)
+
+getAvailableMatrices(Differentiation_P_5)
+table(Differentiation_P_5$Clusters2)
+
+markersPeaks <- getMarkerFeatures(
+    ArchRProj = Differentiation_P_5, 
+    useMatrix = "PeakMatrix", 
+    groupBy = "Clusters2",
+    bias = c("TSSEnrichment", "log10(nFrags)"),
+    testMethod = "wilcoxon"
+)
+markersPeaks
+
+markerList <- getMarkers(markersPeaks, cutOff = "FDR <= 0.01 & Log2FC >= 0.1")
+markerList
+markerList$R0
+markerList$R2
+markerList$R7
+markerList$R9
+markerList$R12
+
+
+heatmapPeaks <-markerHeatmap(
+  seMarker = markersPeaks, 
+  cutOff = "FDR <= 0.1 & Log2FC >= 0.5",
+  transpose = TRUE
+)
+
+#draw(heatmapPeaks, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+
+plotPDF(heatmapPeaks, name = "4_Peak-Marker-Heatmap", width = 8, height = 6, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+pma <- plotMarkers(seMarker = markersPeaks, name = "R2", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "MA")
+pma
+
+pv <- plotMarkers(seMarker = markersPeaks, name = "R2", cutOff = "FDR <= 0.1 & Log2FC <= -1", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R2-Markers-MA-Volcano", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+dev.off()
+rm(Differentiation_P_2_pca)
+rm(doubScores)
+```
+
+```{r ID marker peaks} 
+#R0 R2 R7 R9 R12
+#not working
+heatmapPeaks <- markerHeatmap(
+  seMarker = markersPeaks, 
+  cutOff = "FDR <= 0.1 & Log2FC >= 0.1",
+  transpose = TRUE
+)
+#draw(heatmapPeaks, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+
+plotPDF(heatmapPeaks, name = "3_Peak-Marker-Heatmap_0.1_0.5", width = 8, height = 6, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+dev.off()
+dev.set(dev.next())
+```
+
+```{r Marker Peak MA and Volcano Plots} 
+
+pma <- plotMarkers(seMarker = markersPeaks, name = "R0", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markersPeaks, name = "R0", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R0-Markers-MA-volcano_0.1_1_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+pma <- plotMarkers(seMarker = markersPeaks, name = "R2", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markersPeaks, name = "R2", cutOff = "FDR <= 0.1 & Log2FC >= -1", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R2-Markers-MA-volcano_0.1_1_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+pma <- plotMarkers(seMarker = markersPeaks, name = "R7", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markersPeaks, name = "R7", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R7-Markers-MA-volcano_0.1_1_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+pma <- plotMarkers(seMarker = markersPeaks, name = "R9", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markersPeaks, name = "R9", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R9-Markers-MA-volcano_0.1_1_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+pma <- plotMarkers(seMarker = markersPeaks, name = "R12", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markersPeaks, name = "R12", cutOff = "FDR <= 0.1 & Log2FC >= 1", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R12-Markers-MA-volcano_0.1_1_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+```
+
+
+```{r Marker Peaks of choice in Browser Tracks,include=FALSE} 
+
+ArchRPalettes$custom <-c( 'R0' = '#CCCCCC','R2'= '#DAB6AF', 'R7'='#8175AA','R9' = '#FFC966','R12' = '#8CC2CA')
+MyChoice <- ArchRPalettes$custom
+
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_5, 
+    groupBy = "Clusters2", 
+    geneSymbol = markerGenes, 
+    upstream = 50000,
+    downstream = 50000,
+   pal = MyChoice
+)
+
+grid::grid.newpage()
+grid::grid.draw(p$CD14)
+
+
+plotPDF(plotList = p, 
+    name = "4_Plot-Tracks-With-POU2F5-Features_0.1_0.5_50kb.pdf", 
+    ArchRProj = Differentiation_P_5, 
+    addDOC = TRUE, width = 5, height = 5)
+
+
+ #ArchRBrowser(Differentiation_P_5)
+```
+
+```{r Pairwise Testing Between Groups}
+#This performs a differential test between the two provided groups. In all of these differential tests, the peaks that are higher in the group passed to useGroups will have positive fold change values while the peaks that are higher in the group passed to bgdGroups will have negative fold change values.
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R2"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R0-vs-R2-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R7"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R0-vs-R7-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R9"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R0-vs-R9-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R12"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R0", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R0-vs-R12-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+###R4
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R7"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R2", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R2", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R2-vs-R7-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+###R4
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R9"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R2", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R2", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R2-vs-R9-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R12"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R2", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R2", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "4_R2-vs-R12-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+##R5
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R7",
+  bgdGroups = "R9"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R7", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R7", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "R7-vs-R9-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R7",
+  bgdGroups = "R12"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R7", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R7", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "R7-vs-R12-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R9",
+  bgdGroups = "R12"
+)
+
+pma <- plotMarkers(seMarker = markerTest, name = "R9", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "MA")
+pma
+pv <- plotMarkers(seMarker = markerTest, name = "R9", cutOff = "FDR <= 0.1 & abs(Log2FC) >= 0.5", plotAs = "Volcano")
+pv
+plotPDF(pma, pv, name = "R9-vs-R12-Markers-MA-Volcano_0.5_", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+```
+
+
+```{r JASPAR2020ChromVAR Deviatons Enrichment with ArchR,include=FALSE}
+###
+#pairwise between the compared Clusters2 above
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R2"
+)
+
+
+library(chromVARmotifs)
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "JASPAR2020", name = "Motif_JASPAR", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R0-vs-R2-Markers-Motifs-Enriched_0_1_JASPAR", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+p<-TFBSTools::Matrix(getPeakAnnotation( Differentiation_P_5, "Motif_JASPAR")$motifs)
+library(seqLogo)
+r <- makePWM(p$PAX6_7)
+seqLogo(r, ic.scale=FALSE)
+
+
+########
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R7"
+)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.25"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R2-vs-R7-Markers-Motifs-Enriched_0_1_JASPAR", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+p<-TFBSTools::Matrix(getPeakAnnotation( Differentiation_P_5, "Motif_JASPAR")$motifs)
+library(seqLogo)
+r <- makePWM(p$CREM_6)
+seqLogo(r, ic.scale=FALSE)
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R9"
+)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.25"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R2-vs-R9-Markers-Motifs-Enriched_0_1_JASPAR", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+p<-TFBSTools::Matrix(getPeakAnnotation( Differentiation_P_5, "Motif_JASPAR")$motifs)
+library(seqLogo)
+r <- makePWM(p$CREM_6)
+seqLogo(r, ic.scale=FALSE)
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R12"
+)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.25"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif_JASPAR",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R2-vs-R12-Markers-Motifs-Enriched_0_1_JASPAR", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+p<-TFBSTools::Matrix(getPeakAnnotation( Differentiation_P_5, "Motif_JASPAR")$motifs)
+library(seqLogo)
+r <- makePWM(p$SOX2_617)
+seqLogo(r, ic.scale=FALSE)
+
+
+```
+
+
+```{r CISBP Motif Enrichment in Differential Peaks} 
+#pairwice between the compared Clusters2 above
+library(chromVARmotifs)
+
+markerTest<- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R2"
+)
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R0-vs-R2-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+###
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R7"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R0-vs-R7-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+##
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R9"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R0-vs-R9-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+###
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R0",
+  bgdGroups = "R12"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R0-vs-R12-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+#############
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R7"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R2-vs-R7-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+##
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R9"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R2-vs-R9-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R2",
+  bgdGroups = "R12"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R2-vs-R12-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R7",
+  bgdGroups = "R9"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R7-vs-R9-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R7",
+  bgdGroups = "R12"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R7-vs-R12-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = Differentiation_P_5, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters2",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "R9",
+  bgdGroups = "R12"
+)
+
+
+Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif", force = TRUE)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+motifsUp
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggUp
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.1"
+  )
+motifsDo
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+ggDo
+plotPDF(ggUp, ggDo, name = "4_R9-vs-R12-Markers-Motifs-Enriched_0_1_cisbp", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+
+
+
+rm(seRNA)
+```
+
+```{r ID Motif Enrichment in Marker Peaks} 
+#START FROM here
+library(magick)
+
+ArchRPalettes$custom <-c( 'R0' = '#CCCCCC','R2'= '#DAB6AF', 'R7'='#8175AA','R9' = '#FFC966','R12' = '#8CC2CA')
+customcolor_peak <- ArchRPalettes$custom
+
+
+
+enrichMotifs <- peakAnnoEnrichment(
+    seMarker = markersPeaks,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+enrichMotifs
+heatmapEM <- plotEnrichHeatmap(enrichMotifs, n = 7, transpose = TRUE, pal = customcolor_peak)
+ComplexHeatmap::draw(heatmapEM, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapEM, name = "4_Motifs-Enriched-Marker-peaks-0.1_mycolor-Heatmap_CISBP", width = 6, height = 6, ArchRProj = Differentiation_P_5, addDOC = TRUE, rastr=FALSE)
+
+```
+
+```{r ADD ARCHR function}
+#addArchRAnnotations <- function(
+#  ArchRProj = NULL,
+#  db = "ArchR",
+#  collection = "EncodeTFBS",
+#  name = collection,
+#  force = FALSE,
+#  logFile = createLogFile("addArchRAnnotations")
+#){
+  
+# ArchR:::.validInput(input = ArchRProj, name = "ArchRProj", valid = c("ArchRProj"))
+#  ArchR:::.validInput(input = db, name = "db", valid = c("character"))
+#  ArchR:::.validInput(input = collection, name = "collection", valid = c("character"))
+#  ArchR:::.validInput(input = name, name = "name", valid = c("character"))
+#  ArchR:::.validInput(input = force, name = "force", valid = c("boolean"))
+#  ArchR:::.validInput(input = logFile, name = "logFile", valid = c("character"))
+  
+#  tstart <- Sys.time()
+#  ArchR:::.startLogging(logFile = logFile)
+#  ArchR:::.logThis(mget(names(formals()),sys.frame(sys.nframe())), "addArchRAnnotations Input-Parameters", logFile = logFile)
+  
+#  if(name %in% names(ArchRProj@peakAnnotation)){
+#    if(force){
+#      message("peakAnnotation name already exists! Overriding.")
+#    }else{
+#      stop("peakAnnotation name already exists! set force = TRUE to override!")
+#    }
+#  }
+  
+#  genome <- tolower(validBSgenome(getGenome(ArchRProj))@metadata$genome)
+  
+#  annoPath <- file.path(find.package("ArchR", NULL, quiet = TRUE), "data", "Annotations")
+#  dir.create(annoPath, showWarnings = FALSE)
+  
+#  if(tolower(db) == "lola"){
+    
+#    if(genome == "hg19"){
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/LOLA-Hg19-v1.Anno"
+#    }else if(genome == "hg38"){
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/LOLA-Hg38-v1.Anno"
+#    }else if(genome == "mm9"){
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/LOLA-Mm9-v1.Anno"
+#    }else if(genome == "mm10"){
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/LOLA-Mm10-v1.Anno"
+#    }
+    
+    #Download
+#    if(!file.exists(file.path(annoPath, basename(url)))){
+#      message("Annotation ", basename(url)," does not exist! Downloading..")
+#      download.file(
+#        url = url, 
+#        destfile = file.path(annoPath, basename(url)),
+#        quiet = FALSE
+#      )
+#    }
+#    AnnoFile <- file.path(annoPath, basename(url))
+    
+#  }else if(tolower(db) == "archr"){
+    
+#    if(genome == "hg19"){
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/ArchR-Hg19-v1.Anno"
+#    }else if(genome == "hg38"){
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/ArchR-Hg38-v1.Anno"
+#    }else if(genome == "mm9"){
+#      stop("ArchR mm9 annotations not yet supported! Try LOLA for now!")
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/ArchR-Mm9-v1.Anno"
+#    }else if(genome == "mm10"){
+#      stop("ArchR mm10 annotations not yet supported! Try LOLA for now!")
+#      url <- "https://jeffgranja.s3.amazonaws.com/ArchR/Annotations/ArchR-Mm10-v1.Anno"
+#    }
+    
+    #Download
+#    if(!file.exists(file.path(annoPath, basename(url)))){
+#      message("Annotation ", basename(url)," does not exist! Downloading..")
+#      download.file(
+#        url = url, 
+#        destfile = file.path(annoPath, basename(url)),
+#        quiet = FALSE
+#      )
+#   }
+#    AnnoFile <- file.path(annoPath, basename(url))
+    
+#  }else if(tolower(db) %ni% c("archr", "lola")){
+    
+#    if(!file.exists(db)){
+#      stop("Database path does not exist! Please supply valid database for Annotations!")
+#    }
+#    AnnoFile <- db
+    
+ # }else{
+    
+ #   stop("Please supply valid database for Annotations!")
+    
+#}
+  
+  #Check AnnoFile is ArchRAnno
+# if (h5read(AnnoFile, "Class") != "ArchRAnno") {
+#   stop("Not Valid ArchRAnno!")
+#  }
+  
+  #Check if Collection is Valid
+# h5d <- h5ls(AnnoFile)
+#  collections <- h5d[h5d$group == "/" & h5d$otype == "H5I_GROUP",]$name
+#  if(any(tolower(collections) == tolower(collection))){
+#    collection <- collections[tolower(collections) %in% tolower(collection)]
+#  }else{
+#    stop("Not Valid Collection in ArchRAnno Database!")
+#  }
+  
+  #############################################################
+  # Peak Overlap Matrix
+  #############################################################
+#  peakSet <- getPeakSet(ArchRProj)
+#  chr <- paste0(unique(seqnames(peakSet)))
+  
+#  ArchR:::.logMessage("Annotating Chromosomes", verbose = TRUE, logFile = logFile)
+#  regionMat <- lapply(seq_along(chr), function(i){
+#    ArchR:::.logMessage(paste0("\tAnnotating Chr: ", chr[i]), verbose = TRUE, logFile = logFile)
+#    regions <- ArchR:::.getRegionsFromAnno(AnnoFile = AnnoFile, Group = collection, chr = chr[i])
+#    o <- DataFrame(findOverlaps(query = peakSet, subject = regions, ignore.strand = TRUE))
+#    o$ID <- as.integer(mcols(regions)[o$subjectHits, "ID"])
+#    o$subjectHits <- NULL
+#    o
+#  }) %>% Reduce("rbind", .)
+#  ArchR:::.logThis(regionMat, "regionMat-Overlaps", logFile=logFile)
+  
+#  ArchR:::.logThis(range(regionMat[, 1]), "regionMat-Overlaps-1", logFile=logFile)
+#  ArchR:::.logThis(range(regionMat[, 2]), "regionMat-Overlaps-2", logFile=logFile)
+#  ArchR:::.logThis(peakSet, "regionMat-Overlaps-1-Peaks", logFile=logFile)
+#  ArchR:::.logThis(unique(regionMat$ID), "regionMat-Overlaps-2-IDs", logFile=logFile)
+#  regionMat <- Matrix::sparseMatrix(
+#    i = regionMat[, 1], 
+#    j = regionMat[, 2], 
+#    x = rep(TRUE, nrow(regionMat)), 
+#    dims = c(length(peakSet), max(regionMat$ID))
+#  )
+# ArchR:::.logThis(regionMat, "regionMat", logFile=logFile)
+  
+  #Get Region Metadata
+#  regionMetadata <- DataFrame(h5read(AnnoFile, paste0(collection,"/Info")))
+#  rownames(regionMetadata) <- regionMetadata$name
+#  colnames(regionMat) <- rownames(regionMetadata)
+#  regionMetadata$name <- NULL
+  
+  #Matches Summarized Experiment
+#  regionMat <- SummarizedExperiment::SummarizedExperiment(
+#    assays=SimpleList(matches = regionMat), 
+#    rowRanges = peakSet, 
+#    colData = regionMetadata
+ # )
+#  ArchR:::.logThis(regionMat, "regionSE", logFile=logFile)
+  
+ # dir.create(file.path(getOutputDirectory(ArchRProj), "Annotations"), showWarnings=FALSE)
+#  saveMatches <- file.path(getOutputDirectory(ArchRProj), "Annotations", paste0(name,"-Matches-In-Peaks.rds"))
+  
+ # out <- SimpleList(
+#    regionMatches = regionMat,
+ #   regionPositions = "None",
+  #  date = Sys.Date()
+#  )
+  
+ # ArchRProj@peakAnnotation[[name]]$Name <- name
+#  ArchRProj@peakAnnotation[[name]]$Positions <- "None"
+#  ArchRProj@peakAnnotation[[name]]$Matches <- saveMatches
+  
+# ArchR:::.safeSaveRDS(out, file.path(getOutputDirectory(ArchRProj),  "Annotations", 
+# paste0(name,"-In-Peaks-Summary.rds")), compress = FALSE)
+#  ArchR:::.safeSaveRDS(out$regionMatches, saveMatches, compress = FALSE)
+  
+#  ArchR:::.endLogging(logFile = logFile)
+  
+#  return(ArchRProj)
+  
+# }
+
+```
+
+
+```{r Encode TF Binding Sites}
+ 
+#Differentiation_P_5 <- addArchRAnnotations(ArchRProj = Differentiation_P_5, collection = "EncodeTFBS",force = TRUE)
+
+enrichEncode <- peakAnnoEnrichment(
+seMarker = markersPeaks,
+ArchRProj = Differentiation_P_5,
+peakAnnotation = "EncodeTFBS",
+cutOff = "FDR <= 0.1 & Log2FC >= 0.5"
+ )
+enrichEncode
+heatmapEncode <- plotEnrichHeatmap(enrichEncode, n = 7, transpose = TRUE,pal = customcolor_peak)
+ComplexHeatmap::draw(heatmapEncode, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapEncode, name = "4_Motifs-Enriched-Marker-Heatmap", width = 8, height = 6, ArchRProj = Differentiation_P_5, addDOC = TRUE,rastr=FALSE)
+      
+```
+
+
+
+```{r Codex TFBS}
+
+#Differentiation_P_5 <- addArchRAnnotations(ArchRProj = Differentiation_P_5, collection = "Encodetfbs")
+Differentiation_P_5 <- addArchRAnnotations(ArchRProj = Differentiation_P_5, collection = "Codex")
+## Annotating Chr: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X
+
+enrichCodex <- peakAnnoEnrichment(
+    seMarker = markersPeaks,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "Codex",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+
+
+enrichCodex
+heatmapCodex <- plotEnrichHeatmap(enrichCodex, n = 7, transpose = TRUE, pal=customcolor_peak)
+ComplexHeatmap::draw(heatmapCodex, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapCodex, name = "4_Codex-Enriched-Marker-Heatmap_0.1_", width = 8, height = 6, ArchRProj = Differentiation_P_5, addDOC = TRUE,rastr=FALSE)
+
+```
+
+```{r Codex TFBS}
+
+#Differentiation_P_5 <- addArchRAnnotations(ArchRProj = Differentiation_P_5, collection = "Encodetfbs")
+Differentiation_P_5 <- addArchRAnnotations(ArchRProj = Differentiation_P_5, collection = "JASPAR2020")
+## Annotating Chr: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X
+
+enrichCodex <- peakAnnoEnrichment(
+    seMarker = markersPeaks,
+    ArchRProj = Differentiation_P_5,
+    peakAnnotation = "JASPAR2020",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.1"
+  )
+
+
+enrichCodex
+heatmapCodex <- plotEnrichHeatmap(enrichCodex, n = 7, transpose = TRUE, pal=customcolor_peak)
+ComplexHeatmap::draw(heatmapCodex, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapCodex, name = "4_JASPAR2020-Enriched-Marker-Heatmap_0.1_", width = 8, height = 6, ArchRProj = Differentiation_P_5, addDOC = TRUE,rastr=FALSE)
+
+```
+
+
+```{r ChromVAR Deviatons Enrichment with ArchR,include=FALSE}
+#predicting enrichment of TF activity on a per-cell basis from sparse chromatin accessibility data
+
+#make sure we have added motif annotations
+if("Motif" %ni% names(Differentiation_P_5@peakAnnotation)){
+    Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "cisbp", name = "Motif")
+}
+
+# add a set of background peaks which are used in computing deviations
+Differentiation_P_5 <- addBgdPeaks(Differentiation_P_5, force = TRUE)
+
+#compute per-cell deviations accross all of our motif annotations
+
+Differentiation_P_5 <- addDeviationsMatrix(
+  ArchRProj = Differentiation_P_5, 
+  peakAnnotation = "Motif",
+  force = TRUE
+)
+
+plotVarDev <- getVarDeviations(Differentiation_P_5, name = "MotifMatrix", plot = TRUE)
+
+plotPDF(plotVarDev, name = "4_Plot_cisbp_Variable-Motif-Deviation-Scores", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+motifs <- c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+markerMotifs <- getFeatures(Differentiation_P_5, select = paste(motifs, collapse="|"), useMatrix = "MotifMatrix")
+markerMotifs
+
+
+#we can plot the distribution of chromVAR deviation scores for each cluster. Notice that we supply the impute weights that we calculated previously during our gene score analyses.
+p <- plotGroups(ArchRProj = Differentiation_P_5, 
+  groupBy = "Clusters2", 
+  colorBy = "MotifMatrix", 
+  name = markerMotifs,
+  pal=MyChoice,
+  imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+#we can plot this
+p2 <- lapply(seq_along(p), function(x){
+  if(x != 1){
+    p[[x]] + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6) +
+    theme(plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")) +
+    theme(
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        axis.title.y=element_blank()
+    ) + ylab("")
+  }
+  else{
+    p[[x]] + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6) +
+    theme(plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")) +
+    theme(
+        axis.ticks.y=element_blank(),
+        axis.title.y=element_blank()
+    ) + ylab("")
+  }
+})
+do.call(cowplot::plot_grid, c(list(nrow = 1, rel_widths = c(2, rep(1, length(p2) - 1))),p2))
+
+plotPDF(p, name = "4_Plot_cisbp_chromvar-Groups-Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+
+#Plot onto our UMAPS
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_5, 
+    colorBy = "MotifMatrix", 
+    #reducedDim("IterativeLSI"),
+    name = sort(markerMotifs), 
+    embedding = "UMAP",
+    size=0.3,
+    imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(p, name = "4_UMAP-cisbp_chromvar-Motif_matrix-Groups-Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+# TF deviation z-scores compare to the inferred gene expression via gene scores of the corresponding TF genes, we can overlay the gene scores for each of these TFs on the UMAP embedding
+
+markerRNA <- getFeatures(Differentiation_P_5, select = paste(motifs, collapse="|"), useMatrix = "GeneScoreMatrix")
+markerRNA <- markerRNA[markerRNA %ni% c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")]
+markerRNA
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_5, 
+    colorBy = "GeneScoreMatrix", 
+    name = sort(markerRNA), 
+    embedding = "UMAP",
+    size=0.3,
+    imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(p, name = "4_UMAP-cisbp_chromvar-geneScores-Plot-Groups-Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+#we can plot the linked gene expression for each of these TFs on the UMAP embedding
+
+markerRNA <- getFeatures(Differentiation_P_5, select = paste(motifs, collapse="|"), useMatrix = "GeneIntegrationMatrix")
+markerRNA <- markerRNA[markerRNA %ni% c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")]
+markerRNA
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_5, 
+    colorBy = "GeneIntegrationMatrix", 
+    name = sort(markerRNA), 
+    embedding = "UMAP",
+    size=0.3,
+    imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(p, name = "4_UMAP-cisbp_chromvar_LinkedGeneintegrationExpression-Plot-Groups-Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+saveRDS(Differentiation_P_5, file = "ARCHR_Diff_P4_FINAL_after_MACS2_peak_calling.rds")
+
+```
+
+```{r ArchR and Custom Deviations,include=FALSE}
+#predicting enrichment of TF activity on a per-cell basis from sparse chromatin accessibility data
+
+#make sure we have added motif annotations
+if("Motif" %ni% names(Differentiation_P_5@peakAnnotation)){
+    Differentiation_P_5 <- addMotifAnnotations(ArchRProj = Differentiation_P_5, motifSet = "JASPAR2020", name = "Motif")
+}
+
+# add a set of background peaks which are used in computing deviations
+Differentiation_P_5 <- addBgdPeaks(Differentiation_P_5, force = TRUE)
+
+#compute per-cell deviations across all of our motif annotations
+
+Differentiation_P_5 <- addDeviationsMatrix(
+  ArchRProj = Differentiation_P_5, 
+  peakAnnotation = "Motif",
+  force = TRUE
+)
+
+plotVarDev <- getVarDeviations(Differentiation_P_5, name = "MotifMatrix", plot = TRUE)
+
+plotPDF(plotVarDev, name = "4_JASPAR_2020_Variable-Motif-Deviation-Scores", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+motifs <- c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+markerMotifs <- getFeatures(Differentiation_P_5, select = paste(motifs, collapse="|"), useMatrix = "MotifMatrix")
+markerMotifs
+
+#here we can remove TF binding motifs that are not of interest
+#markerMotifs <- grep("z:", markerMotifs, value = TRUE)
+#markerMotifs <- markerMotifs[markerMotifs %ni% "z:SREBF1_22"]
+#markerMotifs
+
+#we can plot the distribution of chromVAR deviation scores for each cluster. Notice that we supply the impute weights that we calculated previously during our gene score analyses.
+p <- plotGroups(ArchRProj = Differentiation_P_5, 
+  groupBy = "Clusters2", 
+  colorBy = "MotifMatrix", 
+  name = markerMotifs,
+  pal=MyChoice,
+  imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+
+#Plotting
+p2 <- lapply(seq_along(p), function(x){
+  if(x != 1){
+    p[[x]] + guides(color=FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6) +
+    theme(plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")) +
+    theme(
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        axis.title.y=element_blank()
+    ) + ylab("")
+  }
+  else{
+    p[[x]] + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6) +
+    theme(plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")) +
+    theme(
+        axis.ticks.y=element_blank(),
+        axis.title.y=element_blank()
+    ) + ylab("")
+  }
+})
+do.call(cowplot::plot_grid, c(list(nrow = 1, rel_widths = c(2, rep(1, length(p2) - 1))),p2))
+
+plotPDF(p, name = "4_Plot_JASPAR2020_chromvar-Groups-_Motif_Matrix_Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+#Plot onto our UMAPS
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_5, 
+    colorBy = "MotifMatrix", 
+    #reducedDim("IterativeLSI"),
+    name = sort(markerMotifs), 
+    embedding = "UMAP",
+    
+   
+    imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(p, name = "4_UMAP-JASPAR_2020_chromvar-Plot-Groups-_Motif_Matrix_Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+# TF deviation z-scores compare to the inferred gene expression via gene scores of the corresponding TF genes, we can overlay the gene scores for each of these TFs on the UMAP embedding
+
+markerRNA <- getFeatures(Differentiation_P_5, select = paste(motifs, collapse="|"), useMatrix = "GeneScoreMatrix")
+markerRNA <- markerRNA[markerRNA %ni% c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")]
+markerRNA
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_5, 
+    colorBy = "GeneScoreMatrix", 
+    name = sort(markerRNA), 
+    embedding = "UMAP",
+   
+    imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(p, name = "4_UMAP-JASPAR2020_chromvar-geneScores-Plot-Groups-Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+
+#we can plot the linked gene expression for each of these TFs on the UMAP embedding
+
+markerRNA <- getFeatures(Differentiation_P_5, select = paste(motifs, collapse="|"), useMatrix = "GeneIntegrationMatrix")
+markerRNA <- markerRNA[markerRNA %ni% c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")]
+markerRNA
+
+p <- plotEmbedding(
+    ArchRProj = Differentiation_P_5, 
+    colorBy = "GeneIntegrationMatrix", 
+    name = sort(markerRNA), 
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(Differentiation_P_5)
+)
+
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+
+plotPDF(p, name = "4_UMAP-JASPAR2020_chromvar_LinkedGeneExpression-Plot-Groups-Deviations-w-Imputation", width = 5, height = 5, ArchRProj = Differentiation_P_5, addDOC = TRUE)
+```
+
+```{r  Footprinting with ArchR, include=FALSE} 
+#Differentiation_P_5 <- addGroupCoverages(ArchRProj = Differentiation_P_5, groupBy = "Clusters2", force = TRUE)
+motifPositions <- getPositions(Differentiation_P_5)
+motifPositions
+###markers RNA
+#motifs <-  c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+
+
+
+#motifs <- c("GATA1", "GATA2", "GATA3", "GATA5", "JUN", "KLF1", "KLF2", "KLF4", "KLF5", "KLF7", "CEBPA", "CEBPB", "CEBPD", "NFIC", "NR3C1", "TEAD4", "MEF2C", "PPARG1", "PPARG2", "FOXA1", "FOXM1", "FOXA2", "EBF1", "IRF4", "TBX21", "PAX5", "EGR2", "SREBF1", "MTG8", "DDIT3", "TSC22D3","ARID1A", "KMT2D", "IL2R","EP300","CREBBP","EZH2")
+
+#motifs <- c("ABF1","ABF1","ABF2","ABF2","ABF3","ABF4","ABI3","abi4","ABI5","ABR1","ACE2","achi","Adof1","ADR1","AFT1","AFT2","AG","AGL1","AGL13","AGL15","AGL16","AGL25","AGL27","AGL3","AGL42","AGL55","AGL6","AGL63","AHL12","AHL20","AHL25","Ahr::Arnt","AIB","AIL7","al","Alx1","ALX3","Alx4","ANAC050","ANAC13","ANL2","ANT","Antp","ap","AP1","AP3","Ar","ara","ARALYDRAFT_484486","ARALYDRAFT_493022","ARALYDRAFT_495258","ARALYDRAFT_496250","ARALYDRAFT_897773","AREB3","ARF1","ARF10","ARF13","ARF14","ARF16","ARF18","ARF2","ARF25","ARF27","ARF29","ARF3","ARF34","ARF35","ARF36","ARF39","ARF4","ARF5","ARF7","ARF8","ARG80","ARG81","ARGFX","Arid3a","Arid3b","Arid5a","Arnt","ARNT::HIF1A","ARNT2","Arntl","ARO80","ARR1","ARR1","ARR10","ARR11","ARR14","ARR18","ARR2","Arx","ASCL1","ASCL1(var.2)","Ascl2","ASG1","ASH1","AT1G01250","AT1G13300","AT1G14580","At1g19000","AT1G22810","AT1G36060","AT1G44830","AT1G47655","At1g49010","AT1G69570","At1g72010","AT1G72740","At1g74840","AT1G75490","AT1G76870","AT1G76880","AT1G77640","AT2G20110","AT2G28810","AT2G33710","At2g38090","AT2G40260","AT2G44940","At2g45680","At3g09600","AT3G10030","AT3G10113","AT3G10580","At3g11280","AT3G16280","AT3G24120","AT3G45610","AT3G46070","AT3G52440","AT3G57600","AT4G12670","AT4G16750","AT4G18450","AT4G28140","AT4G32800","AT5G02460","At5g05790","At5g08520","AT5G18450","AT5G47660","AT5G56840","At5g58900","AT5G61620","AT5G66940","AT5G67000","Atf1","ATF2","ATF3","ATF4","ATF6","ATF7","atf-7","AT-GTL1","ATHB-12","ATHB13","ATHB15","ATHB-16","ATHB18","ATHB20","ATHB23","ATHB34","ATHB4","ATHB40","ATHB-5","ATHB-51","ATHB53","ATHB-6","ATHB7","ATHB-9","Atoh1","ATOH1(var.2)","ATOH7","Awh","AZF1","BACH1")
+#motifs <- c("Bach1::Mafk","BACH2","BACH2(var.2)","bap","BARHL1","BARHL2","BARX1","BARX2","BAS1","BATF","BATF::JUN","BATF3","bcd","BCL6","BCL6B","BEAF-32","BEE2","BEH2","BEH3","BEH4","Bgb::run","B-H1","B-H2","BHLH104","BHLH112","BHLH13","bHLH130","bHLH18","BHLH3","bHLH31","BHLH34","bHLH69","bHLH74","bHLH77","BHLH78","bHLH80","Bhlha15","BHLHA15(var.2)","BHLHE22","BHLHE22(var.2)","BHLHE23","BHLHE40","BHLHE41","BIM1","BIM2","BIM3","blmp-1","BPC1","BPC5","BPC6","br","br(var.2)","br(var.3)","br(var.4)","brk","bsh","BSX","btd","btn","bZIP14","bZIP16","bZIP28","bZIP3","bZIP42","bZIP43","bZIP44","bZIP48","bZIP50","bZIP52","bZIP53","BZIP60","bZIP68","bZIP910","bZIP911","BZR1","BZR2","C15","cad","CAD1","CAMTA1","CAT8","caup","CBF1","CBF1","CBF2","CBF4","CCA1","CDC5","CDF2","CDF3","CDX1","CDX2","CDX4","cebp-1","CEBPA","CEBPB","CEBPD","CEBPE","CEBPG","CEBPG(var.2)","ceh-10::ttx-3","ceh-22","ceh-28","ceh-38","ceh-48","CEJ1","CENPB","CEP3","ces-2","Cf2","CG11085","CG11294","CG11617","CG15696-RA","CG18599","CG32105","CG32532","CG34031","CG4328-RA","CG9876","CHA4","che-1","CIN5","Clamp","CLOCK","CMTA2","CMTA3","cnc::maf-S","COG1","cre-1","CREB1","CREB3","CREB3L1","Creb3l2","CREB3L4","CREB3L4(var.2)","Creb5","CREM","CRF2","CRF4","Crx","CRZ1","CST6","ct","CTCF","CTCF","CTCFL","CUP2","CUP9","CUX1","CUX2","D","daf-12","daf-16","DAG2","DAL80","DAL81","DAL82","DBP","Dbx","Ddit3::Cebpa","Deaf1","DEAR3","DEAR5","Dfd","dl","dl(var.2)","Dll","Dlx1","Dlx2","Dlx3","Dlx4","DLX5","DLX6","Dmbx1","Dmrt1","DMRT3","dmrt99B","DMRTA2","DMRTC2","DOF1.8","Dof2","DOF2.4","DOF2.5","Dof3","dof4.2","dof4.5","DOF5.3","DOF5.6","DOF5.7","DOT6","DPBF3","DPRX","dpy-27","Dr","DRE1C","DREB19","DREB1A","DREB1B","DREB1C","DREB1E","DREB1G","DREB2","DREB26","DREB2C","Dref","DRGX","dsc-1","Dux","DUX4","DUXA","dve")
+
+#motifs <-  c("E2F1", "E2F2", "E2F3", "E2F4","E2F6","E2F7","E2F8","E2FA","E5","EBF1","Ebf2","EBF3","ECM22","ECM23","EcR::usp","EDS1","EDT1",  "efl-1","EFM","EGR1","EGR2","EGR3","EGR4","EHF","Eip74EF","ELF1","ELF2","ELF3","ELF4","ELF5","ELK1","ELK3","ELK4","elt-2","elt-3","elt-6", "EmBP-1","ems","EMX1","EMX2","en","EN1","EN2","EOMES","eor-1","EPR1","ERF008","ERF015","ERF017","ERF018","ERF019","ERF021","ERF027",     "Foxj2","Foxj3","FOXK1","FOXK2","FOXL1","Foxl2","Foxn1","FOXN3","Foxo1","FOXO3","FOXO4","FOXO6","FOXP1","FOXP2","FOXP3","Foxq1","ftz","FUS3","FZF1","GABPA","GAL4","Gam1","GAT1","GAT3","GAT4","GATA1","GATA1::TAL1","GATA10","GATA11","GATA12","GATA14","GATA15","GATA19","GATA2","GATA20","GATA3","GATA4","GATA5","GATA6","GATA6","GATA8","GATA9","GBF2","GBF3","GBF6","GBX1","GBX2","GCM1","GCM2","gcm2","GCN4", "GCR1","GCR2", "GF1", "Gfi1b","GIS1","GLI2","GLI3","GLIS1","GLIS2","GLIS3","GLN3","Glyma19g26560.1","Gmeb1","GMEB2","grh","GRHL1","GRHL2","Gsc","GSC","GSC2","GSM1","GSX1","GSX2","gt","GT-1","GT-2","GT-4","GT-A3","GZF3","h","H2.0","HAC1","HAL9","Hand1::Tcf3","HAND2","HAP1","HAP2","HAP3","HAP5","HAT1","HAT2","HAT22","HAT5","hb","HBI1","hbn","HCM1","HDG1","HES1","HES2","HES5","HES6","HES7","HESX1","HEY1","HEY2","HGTX","HHEX","HHO2","HHO3","HHO5","HHO6","Hic1","HIC2","HIF1A","HINFP","hkb","HLF","hlh-1","hlh-30","HLTF","HMBOX1","HMG-1","HMG-I/Y", "HMRA1","HMRA2","Hmx","Hmx1","Hmx2","Hmx3","HNF1A","HNF1B","HNF4A","HNF4A(var.2)","HNF4G","HOXA1","HOXA10","Hoxa11","HOXA13", "HOXA2","HOXA4","HOXA5","HOXA6","HOXA7","HOXA9","HOXB13","HOXB2","HOXB3","HOXB4","HOXB5","HOXB6","HOXB7","HOXB8","HOXB9","HOXC10","HOXC11", "HOXC12", "HOXC13", "HOXC4", "HOXC8", "HOXC9", "HOXD10", "HOXD11", "HOXD12", "HOXD13", "HOXD3", "HOXD4", "HOXD8", "HOXD9", "Hsf", "HSF1", "HSF1", "HSF2",  "HSF4", "HSFA6B", "HSFB2A", "HSFB2")
+
+#motifs <-  c("HSFC1","hth","HY5","HYH","id1","IDD2","IDD4","IDD5","IDD7","IKZF1","IME1","ind","INO2","INO4","INSM1","inv","IRF1","IRF2","IRF3","IRF4","IRF5","IRF6","IRF7","IRF8","IRF9","Isl1","ISL2","ISX","IXR1","JDP2","JDP2(var.2)","JKD","JUN","JUN(var.2)","JUN::JUNB","JUN::JUNB(var.2)","JUNB","JUNB(var.2)","JUND","JUND(var.2)","KAN1","KAN2","KAN4","Klf1","KLF10","KLF11","Klf12","KLF13","KLF14","KLF15","KLF16","KLF17","KLF2","KLF3","KLF4","KLF5","KLF6","KLF9","kni","Kr","KUA1","lab","LBD18","lbe","lbl","LBX1","LBX2","LCL1","LEC2","LEF1","LEP","LEU3","LFY","LHX1","LHX2","Lhx3","Lhx4","LHX5","LHX6","Lhx8","LHX9","LHY1","Lim1","Lim3","lim-4","lim-7","lin-14","LIN54","lin-54","lms","LMX1A","LMX1B","LYS14","M1BP","mab-3","mab-5","MAC1","Macho-1","Mad","MAF","MAF::NFE2","MAFA","Mafb","MAFF","MAFG","MAFK","MATALPHA2","MAX","MAX::MYC","MAZ","MBP1","MBP1::SWI6","MCM1","Mecom","MEF2A","MEF2B","MEF2C","MEF2D","MEIS1","MEIS1(var.2)","MEIS2","MEIS2(var.2)","MEIS3","MEOX1","MEOX2","MET28","MET31","MET32","MET4","MGA","MGA1","MGP","MIG1","MIG2","MIG3","mirr","MITF","mix-a","MIXL1","MLX","Mlxip","MLXIPL","MNB1A","MNT","MNX1","MOT2","MOT3","MSANTD3","MSC","MSGN1","msn-1","MSN2","MSN4","MSX1","MSX2","Msx3","MTF1","MXI1","MYB","myb.Ph3","MYB1","MYB101","MYB105","MYB111","MYB113","MYB118","MYB119","MYB124","MYB15","MYB24","MYB27","MYB3","MYB33","MYB3R1","MYB3R4","MYB3R5","MYB4","MYB46","MYB52","MYB55","MYB56","MYB57","MYB59","MYB62","MYB65","MYB70","MYB73","MYB77","MYB81","MYB98","MYBL1","MYBL2","MYC","MYC2","MYC3","MYC4","MYCN","MYF5","MYF6","MYOD1","MYOG","MYR2","MZF1","MZF1(var.2)","NAC017","NAC025","NAC028","NAC029","NAC043","NAC055","NAC058","NAC062","NAC078","NAC080","NAC083","NAC92","NCU00019","NCU02182","NDT80","NEUROD1","NEUROD2","NEUROG1","NEUROG2","NEUROG2(var.2)","NFAT5","NFATC1","NFATC2","NFATC3","NFATC4","NFE2","NFE2L1","Nfe2l2","NFIA","NFIB","NFIC","NFIC(var.2)","NFIC::TLX1","NFIL3","NFIX","NFIX(var.2)","NFKB1","NFKB2","NFYA","NFYB","NFYC","NHLH1","NHLH2","NHP10","NHP6A","NHP6B","nhr-6","nit-4","NK7.1","NKX2-2","NKX2-3","NKX2-5","Nkx2-5(var.2)","NKX2-8","Nkx3-1","Nkx3-2","NKX6-1","NKX6-2","NKX6-3","Nobox","NOTO","Npas2","NR1D1","NR1D2","NR1H2::RXRA", "SREBF1_22")
+
+#motifs <-  c("Nr1h3::Rxra","NR1H4","NR1H4::RXRA","NR1I2","NR1I3","NR2C1","NR2C2","NR2C2(var.2)","Nr2e1","Nr2e3","NR2F1","NR2F1(var.2)","NR2F1(var.3)","NR2F2","Nr2f6","Nr2f6(var.2)","NR2F6(var.3)","NR3C1","NR3C2","NR4A1","NR4A2","NR4A2::RXRA","NR5A1","Nr5a2","NR6A1","NRF1","NRG1","NRL","NSI1","NTL8","NTL9","nub","NUC","nuc-1","O2","OAF1","OBP1","OBP3","OBP4","oc","odd","OdsH","OJ1058_F05.8","OJ1581_H09.2","OLIG1","OLIG2","OLIG3","onecut","ONECUT1","ONECUT2","ONECUT3","opa","OPI1","Optix","Os05g0497200","OsI_08196","OSR1","OSR2","OsRR22","otp","OTX1","OTX2","ovo","OVOL1","OVOL2","P0510F09.23","pal-1","pan","PAX1","Pax2","PAX3","PAX3(var.2)","PAX4","PAX5","PAX6","PAX7","PAX9","pb","PBF","PBX1","PBX2","PBX3","Pdp1","PDR1","PDR3","PDR8","PDX1","PEND","pha-4","PHD1","PHDP","PHL1","PHL11","PHL12","PHL7","pho","PHO2","PHO4","PHOX2A","PHOX2B","PHYPADRAFT_140773","PHYPADRAFT_143875","PHYPADRAFT_153324","PHYPADRAFT_173530","PHYPADRAFT_182268","PHYPADRAFT_28324","PHYPADRAFT_38837","PHYPADRAFT_48267","PHYPADRAFT_64121","PHYPADRAFT_72483","PI","PIF1","PIF3","PIF4","PIF5","PIF7","PITX1","PITX2","PITX3","PKNOX1","PKNOX2","PLAG1","Plagl1","PLAGL2","PLT1","PLT3","pnr","POPTR_0002s00440g","POU1F1","POU2F1","POU2F2","POU2F3","POU3F1","POU3F2","POU3F3","POU3F4","POU4F1","POU4F2","POU4F3","POU5F1","Pou5f1::Sox2","POU5F1B","POU6F1","POU6F1(var.2)","POU6F2","PPARA::RXRA","PPARD","PPARG","Pparg::Rxra","Pph13","pqm-1","prd","PRDM1","Prdm15","PRDM4","PROP1","PROX1","PRRX1","PRRX2","PTF1","Ptf1a","Ptf1a(var.2)","Ptf1a(var.3)","Ptx1","PUCHI","PUT3","RAMOSA1","RAP1","RAP21","RAP2-1","RAP210","RAP2-10","RAP211","RAP212","RAP2-3","RAP26","RAP2-6","RARA","RARA(var.2)","RARA::RXRA","RARA::RXRG","Rarb","Rarb(var.2)","RARB(var.3)","Rarg","Rarg(var.2)","RARG(var.3)","RAV1","RAV1(var.2)","RAX","RAX2","RAX3","RBPJ","Rbpjl","RDR1","RDS1","RDS2","REB1","REF6","REI1","REL","RELA","RELB","repo","REST","RFX1","RFX1","RFX2","RFX3","RFX4","RFX5","RFX7","RGM1","RGT1","Rhox11","RHOXF1","RIM101","RLM1","RME1","ro","RORA","RORA(var.2)","RORB","RORC","ROX1","RPH1","RPN4","RREB1","RSC3","RSC30","rst2","RTG3","RUNX1","RUNX2","RUNX3","RVE1","RVE5","RVE6","RVE7","Rx","Rxra","RXRA::VDR","RXRB","RXRB(var.2)","RXRG","RXRG(var.2)")
+
+motifs <-  c("schlank","Scr","SCRT1","SCRT2","sd","SEP1","SEP3","SFL1","SFP1","SGR5","SHOX","Shox2","SIP4","SIX1","SIX2","Six3","Six4","SIZF2","skn-1","SKN7","SKO1","slbo","slou","slp1","sma-4","Smad2::Smad3","SMAD2::SMAD3::SMAD4","SMAD3","Smad4","SMAD5","SMP1","SMZ","sna","SNAI1","SNAI2","SNAI3","snpc-4","SNT2","so","SOC1","SOHLH2","SOK2","SOL1","Sox1","SOX10","Sox11","SOX12","SOX13","SOX14","SOX15","Sox17","SOX18","SOX2","SOX21","Sox3","SOX4","Sox5","Sox6","SOX8","SOX9","SP1","SP2","SP3","SP4","SP8","SP9","SPDEF","SPI1","SPIB","SPIC","SPL1","SPL11","SPL12","SPL13","SPL14","SPL15","SPL3","SPL4","SPL5","SPL7","SPL8","SPL9","SPT","SPT15","SPT2","SPT23","Spz1","squamosa","SRD1","SREBF1","SREBF1(var.2)","SREBF2","SREBF2(var.2)","SRF","SRM1","SRY","STAT1","STAT1::STAT2","Stat2","STAT3","Stat4","Stat5a","Stat5a::Stat5b","Stat5b","Stat6","Stat92E","STB3","STB4","STB5","StBRC1","STE12","STP1","STP2","STP3","STP4","STZ","Su(H)","su(Hw)","SUM1","SUT1","SUT2","sv","SVP","SWI4","SWI5","T11I18.17","TAL1::TCF3","TB1","TBF1","TBP","TBP3","TBR1","TBS1","TBX1","TBX15","TBX18","TBX19","TBX2","TBX20","TBX21","TBX3","TBX4","TBX5","TBX6","TBXT","Tcf12","TCF12(var.2)","Tcf21","TCF21(var.2)","TCF3","TCF4","TCF7","TCF7L1","TCF7L2","TCFL5","TCP1","TCP14","TCP15","TCP16","TCP17","TCP19","TCP2","TCP20","TCP21","TCP23","TCP24","TCP3","TCP4","TCP5","TCP7","TCP8","TCX2","TCX3","TDA9","TEA1","TEAD1","TEAD2","TEAD3","TEAD4","TEC1","TEF","TFAP2A","TFAP2A(var.2)","TFAP2A(var.3)","TFAP2B","TFAP2B(var.2)","TFAP2B(var.3)","TFAP2C","TFAP2C(var.2)","TFAP2C(var.3)","TFAP2E","TFAP4","TFAP4(var.2)","TFCP2","TFDP1","TFE3","TFEB","TFEC","TGA1","TGA10","TGA1A","TGA2","TGA3","TGA4","TGA5","TGA6","TGA7","TGA9","TGIF1","TGIF2","TGIF2LX","TGIF2LY","THAP1","THAP11","THI2","THRB","THRB(var.2)","THRB(var.3)","tin","TINY","tll","TLX2","TOD6","TOS8","TP53","TP63","TP73","Trl","TRP1","TRP2","TSAR1","TSAR2","TSO1","ttk","tup","twi","TWIST1","Twist2","TYE7","Ubx","UGA3","UIF1","UME6","unc-30","unc-4","unc-62","unc-86","UNCX","UNE10","unpg","UPC2","URC2","USF1","USF2","usp","USV1","vab-7","VAX1","VAX2","VDR","VENTX","VEZF1","vfl","vis","vnd","Vsx1","VSX1","Vsx2","VSX2","vvl","wc-1","WRKY11","WRKY12","WRKY14","WRKY15","WRKY17","WRKY18","WRKY2","WRKY20","WRKY21","WRKY22","WRKY23","WRKY24","WRKY25","WRKY26","WRKY27","WRKY28","WRKY29","WRKY3","WRKY30","WRKY31","WRKY33","WRKY38","WRKY40","WRKY42","WRKY43","WRKY45","WRKY46","WRKY47","WRKY48","WRKY50","WRKY55","WRKY57","WRKY59","WRKY6","WRKY60","WRKY62","WRKY63","WRKY65","WRKY7","WRKY70","WRKY71","WRKY75","WRKY8","Wt1","XBP1","XBP1","YAP1","YAP3","YAP5","YAP6","YAP7","YER130C","YER184C","YGR067C","YHP1","YKL222C","YLL054C","YLR278C","YNR063W","YOX1","YPR013C","YPR015C","YPR022C","YPR196W","YRM1","YRR1","YY1","YY2","z","ZAP1","ZAP1","ZBED1","ZBTB12","ZBTB14","ZBTB18","ZBTB26","ZBTB32","ZBTB33","ZBTB6","ZBTB7A","ZBTB7B","ZBTB7C","ZEB1","zen","zen2","zfh-2","ZFP42","ZFP57","Zfx","ZHD1","ZHD3","ZHD5","ZHD6","ZIC1","Zic1::Zic2","Zic2","ZIC3","ZIC4","ZIC5","zip-8","ZKSCAN1","ZKSCAN5","ZMS1","ZNF135","ZNF136","ZNF140","ZNF143","ZNF148","ZNF16","ZNF24","ZNF263","ZNF274","Znf281","ZNF282","ZNF317","ZNF341","ZNF354C","ZNF382","ZNF384","ZNF410","Znf423","ZNF449","ZNF460","ZNF528","ZNF652","ZNF682","ZNF684","ZNF740","ZNF75D","ZSCAN29","ZSCAN4")
+
+
+markerMotifs <- unlist(lapply(motifs, function(x) grep(x, names(motifPositions), value = TRUE)))
+markerMotifs <- markerMotifs[markerMotifs %ni% "SREBF1_22"]
+markerMotifs
+
+
+seFoot <- getFootprints(
+  ArchRProj = Differentiation_P_5, 
+  positions = motifPositions[markerMotifs], 
+  groupBy = "Clusters2",
+)
+#ARCHR Palettes
+ArchRPalettes$custom <-c( 'R0' = '#CCCCCC','R2'= '#DAB6AF', 'R7'='#8175AA','R9' = '#FFC966','R12' = '#8CC2CA')
+customcolor_peak <- ArchRPalettes$custom
+#Normalization of Footprints for Tn5 Bias
+
+#Subtracting the Tn5 Bias
+
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = Differentiation_P_5, 
+  normMethod = "Subtract",
+  plotName = "6_Footprints-Subtract-Bias-S_Z",
+  addDOC = TRUE,
+  smoothWindow = 5,
+  height = 6,
+  width = 4,
+  pal=customcolor_peak
+)
+
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = Differentiation_P_5, 
+  normMethod = "Divide",
+  plotName = "6_Footprints-Divide-Bias",
+  addDOC = TRUE,
+  smoothWindow = 5,
+  height = 6,
+  width = 4,
+  pal=customcolor_peak
+)
+
+
+
+
+seTSS <- getFootprints(
+  ArchRProj = Differentiation_P_5, 
+  positions = GRangesList(TSS = getTSS(Differentiation_P_5)), 
+  groupBy = "Clusters2",
+  flank = 2000
+)
+
+plotFootprints(
+  seFoot = seTSS,
+  ArchRProj = Differentiation_P_5, 
+  normMethod = "None",
+  plotName = "TSS-No-Normalization",
+  addDOC = TRUE,
+  flank = 2000,
+  flankNorm = 100,
+  height = 6,
+  width = 4,
+  pal=customcolor_peak
+)
+
+```
+
+
+
+```{r Co-accessibility with ArchR,include=FALSE} 
+
+
+Differentiation_P_5 <- addCoAccessibility(
+    ArchRProj = Differentiation_P_5,
+    reducedDims = "IterativeLSI"
+)
+
+cA <- getCoAccessibility(
+    ArchRProj = Differentiation_P_5,
+    corCutOff = 0.5,
+    resolution = 1,
+    returnLoops = FALSE
+)
+
+cA
+
+metadata(cA)[[1]]
+
+cA <- getCoAccessibility(
+    ArchRProj = Differentiation_P_5,
+    corCutOff = 0.5,
+    resolution = 1,
+    returnLoops = TRUE
+)
+
+cA[[1]]
+
+cA <- getCoAccessibility(
+    ArchRProj = Differentiation_P_5,
+    corCutOff = 0.5,
+    resolution = 1000,
+    returnLoops = TRUE
+)
+
+cA[[1]]
+
+cA <- getCoAccessibility(
+    ArchRProj = Differentiation_P_5,
+    corCutOff = 0.5,
+    resolution = 10000,
+    returnLoops = TRUE
+)
+
+cA[[1]]
+
+```
+
+
+```{r Plotting browser tracks of Co-accessibility,include=FALSE} 
+
+RNAmarkerGenes1  <- c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+
+set.seed(1)
+addArchRThreads(threads = 1)
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_5, 
+    groupBy = "Clusters2", 
+    geneSymbol = RNAmarkerGenes1, 
+    upstream = 50000,
+    downstream = 50000,
+    pal=customcolor_peak,
+    loops = getCoAccessibility(Differentiation_P_5)
+)
+
+grid::grid.newpage()
+grid::grid.draw(p$CD14)
+
+plotPDF(plotList = p, 
+    name = "5_Plot-Tracks-RNASEQ_LIST-Genes-0.5-CoAccessibility.pdf", 
+    ArchRProj = Differentiation_P_5, 
+    addDOC = TRUE, width = 5, height = 5)
+
+
+
+ATACmarkerGenes1  <- c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+
+set.seed(1)
+addArchRThreads(threads = 1)
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_5, 
+    groupBy = "Clusters2", 
+    geneSymbol = ATACmarkerGenes1, 
+    upstream = 50000,
+    downstream = 50000,
+    pal=customcolor_peak,
+    loops = getCoAccessibility(Differentiation_P_5)
+)
+
+grid::grid.newpage()
+grid::grid.draw(p$CD14)
+
+plotPDF(plotList = p, 
+    name = "5_Plot-Tracks-ATACSEQ_LIST-Genes-0.5-CoAccessibility.pdf", 
+    ArchRProj = Differentiation_P_5, 
+    addDOC = TRUE, width = 5, height = 5)
+
+```
+
+```{r contd.1 Plotting browser tracks of Co-accessibility for MOTIFS,include=FALSE}
+
+
+#motifs <- c("ABF1","ABF1","ABF2","ABF2","ABF3","ABF4","ABI3","abi4","ABI5","ABR1","ACE2","achi","Adof1","ADR1","AFT1","AFT2","AG","AGL1","AGL13","AGL15","AGL16","AGL25","AGL27","AGL3","AGL42","AGL55","AGL6","AGL63","AHL12","AHL20","AHL25","Ahr::Arnt","AIB","AIL7","al","Alx1","ALX3","Alx4","ANAC050","ANAC13","ANL2","ANT","Antp","ap","AP1","AP3","Ar","ara","ARALYDRAFT_484486","ARALYDRAFT_493022","ARALYDRAFT_495258","ARALYDRAFT_496250","ARALYDRAFT_897773","AREB3","ARF1","ARF10","ARF13","ARF14","ARF16","ARF18","ARF2","ARF25","ARF27","ARF29","ARF3","ARF34","ARF35","ARF36","ARF39","ARF4","ARF5","ARF7","ARF8","ARG80","ARG81","ARGFX","Arid3a","Arid3b","Arid5a","Arnt","ARNT::HIF1A","ARNT2","Arntl","ARO80","ARR1","ARR1","ARR10","ARR11","ARR14","ARR18","ARR2","Arx","ASCL1","ASCL1(var.2)","Ascl2","ASG1","ASH1","AT1G01250","AT1G13300","AT1G14580","At1g19000","AT1G22810","AT1G36060","AT1G44830","AT1G47655","At1g49010","AT1G69570","At1g72010","AT1G72740","At1g74840","AT1G75490","AT1G76870","AT1G76880","AT1G77640","AT2G20110","AT2G28810","AT2G33710","At2g38090","AT2G40260","AT2G44940","At2g45680","At3g09600","AT3G10030","AT3G10113","AT3G10580","At3g11280","AT3G16280","AT3G24120","AT3G45610","AT3G46070","AT3G52440","AT3G57600","AT4G12670","AT4G16750","AT4G18450","AT4G28140","AT4G32800","AT5G02460","At5g05790","At5g08520","AT5G18450","AT5G47660","AT5G56840","At5g58900","AT5G61620","AT5G66940","AT5G67000","Atf1","ATF2","ATF3","ATF4","ATF6","ATF7","atf-7","AT-GTL1","ATHB-12","ATHB13","ATHB15","ATHB-16","ATHB18","ATHB20","ATHB23","ATHB34","ATHB4","ATHB40","ATHB-5","ATHB-51","ATHB53","ATHB-6","ATHB7","ATHB-9","Atoh1","ATOH1(var.2)","ATOH7","Awh","AZF1","BACH1")
+ motifs <- c("Bach1::Mafk","BACH2","BACH2(var.2)","bap","BARHL1","BARHL2","BARX1","BARX2","BAS1","BATF","BATF::JUN","BATF3","bcd","BCL6","BCL6B","BEAF-32","BEE2","BEH2","BEH3","BEH4","Bgb::run","B-H1","B-H2","BHLH104","BHLH112","BHLH13","bHLH130","bHLH18","BHLH3","bHLH31","BHLH34","bHLH69","bHLH74","bHLH77","BHLH78","bHLH80","Bhlha15","BHLHA15(var.2)","BHLHE22","BHLHE22(var.2)","BHLHE23","BHLHE40","BHLHE41","BIM1","BIM2","BIM3","blmp-1","BPC1","BPC5","BPC6","br","br(var.2)","br(var.3)","br(var.4)","brk","bsh","BSX","btd","btn","bZIP14","bZIP16","bZIP28","bZIP3","bZIP42","bZIP43","bZIP44","bZIP48","bZIP50","bZIP52","bZIP53","BZIP60","bZIP68","bZIP910","bZIP911","BZR1","BZR2","C15","cad","CAD1","CAMTA1","CAT8","caup","CBF1","CBF1","CBF2","CBF4","CCA1","CDC5","CDF2","CDF3","CDX1","CDX2","CDX4","cebp-1","CEBPA","CEBPB","CEBPD","CEBPE","CEBPG","CEBPG(var.2)","ceh-10::ttx-3","ceh-22","ceh-28","ceh-38","ceh-48","CEJ1","CENPB","CEP3","ces-2","Cf2","CG11085","CG11294","CG11617","CG15696-RA","CG18599","CG32105","CG32532","CG34031","CG4328-RA","CG9876","CHA4","che-1","CIN5","Clamp","CLOCK","CMTA2","CMTA3","cnc::maf-S","COG1","cre-1","CREB1","CREB3","CREB3L1","Creb3l2","CREB3L4","CREB3L4(var.2)","Creb5","CREM","CRF2","CRF4","Crx","CRZ1","CST6","ct","CTCF","CTCF","CTCFL","CUP2","CUP9","CUX1","CUX2","D","daf-12","daf-16","DAG2","DAL80","DAL81","DAL82","DBP","Dbx","Ddit3::Cebpa","Deaf1","DEAR3","DEAR5","Dfd","dl","dl(var.2)","Dll","Dlx1","Dlx2","Dlx3","Dlx4","DLX5","DLX6","Dmbx1","Dmrt1","DMRT3","dmrt99B","DMRTA2","DMRTC2","DOF1.8","Dof2","DOF2.4","DOF2.5","Dof3","dof4.2","dof4.5","DOF5.3","DOF5.6","DOF5.7","DOT6","DPBF3","DPRX","dpy-27","Dr","DRE1C","DREB19","DREB1A","DREB1B","DREB1C","DREB1E","DREB1G","DREB2","DREB26","DREB2C","Dref","DRGX","dsc-1","Dux","DUX4","DUXA","dve","E2F1", "E2F2", "E2F3", "E2F4","E2F6","E2F7","E2F8","E2FA","E5","EBF1","Ebf2","EBF3","ECM22","ECM23","EcR::usp","EDS1","EDT1",  "efl-1","EFM","EGR1","EGR2","EGR3","EGR4","EHF","Eip74EF","ELF1","ELF2","ELF3","ELF4","ELF5","ELK1","ELK3","ELK4","elt-2","elt-3","elt-6", "EmBP-1","ems","EMX1","EMX2","en","EN1","EN2","EOMES","eor-1","EPR1","ERF008","ERF015","ERF017","ERF018","ERF019","ERF021","ERF027","Foxj2","Foxj3","FOXK1","FOXK2","FOXL1","Foxl2","Foxn1","FOXN3","Foxo1","FOXO3","FOXO4","FOXO6","FOXP1","FOXP2","FOXP3","Foxq1","ftz","FUS3","FZF1","GABPA","GAL4","Gam1","GAT1","GAT3","GAT4","GATA1","GATA1::TAL1","GATA10","GATA11","GATA12","GATA14","GATA15","GATA19","GATA2","GATA20","GATA3","GATA4","GATA5","GATA6","GATA6","GATA8","GATA9","GBF2","GBF3","GBF6","GBX1","GBX2","GCM1","GCM2","gcm2","GCN4", "GCR1","GCR2", "GF1", "Gfi1b","GIS1","GLI2","GLI3","GLIS1","GLIS2","GLIS3","GLN3","Glyma19g26560.1","Gmeb1","GMEB2","grh","GRHL1","GRHL2","Gsc","GSC","GSC2","GSM1","GSX1","GSX2","gt","GT-1","GT-2","GT-4","GT-A3","GZF3","h","H2.0","HAC1","HAL9","Hand1::Tcf3","HAND2","HAP1","HAP2","HAP3","HAP5","HAT1","HAT2","HAT22","HAT5","hb","HBI1","hbn","HCM1","HDG1","HES1","HES2","HES5","HES6","HES7","HESX1","HEY1","HEY2","HGTX","HHEX","HHO2","HHO3","HHO5","HHO6","Hic1","HIC2","HIF1A","HINFP","hkb","HLF","hlh-1","hlh-30","HLTF","HMBOX1","HMG-1","HMG-I/Y","HMRA1","HMRA2","Hmx","Hmx1","Hmx2","Hmx3","HNF1A","HNF1B","HNF4A","HNF4A(var.2)","HNF4G","HOXA1","HOXA10","Hoxa11","HOXA13", "HOXA2","HOXA4","HOXA5","HOXA6","HOXA7","HOXA9","HOXB13","HOXB2","HOXB3","HOXB4","HOXB5","HOXB6","HOXB7","HOXB8","HOXB9","HOXC10","HOXC11", "HOXC12", "HOXC13", "HOXC4", "HOXC8", "HOXC9", "HOXD10", "HOXD11", "HOXD12", "HOXD13", "HOXD3", "HOXD4", "HOXD8", "HOXD9", "Hsf", "HSF1", "HSF1", "HSF2",  "HSF4", "HSFA6B", "HSFB2A", "HSFB2")
+
+#motifs <-  c("HSFC1","hth","HY5","HYH","id1","IDD2","IDD4","IDD5","IDD7","IKZF1","IME1","ind","INO2","INO4","INSM1","inv","IRF1","IRF2","IRF3","IRF4","IRF5","IRF6","IRF7","IRF8","IRF9","Isl1","ISL2","ISX","IXR1","JDP2","JDP2(var.2)","JKD","JUN","JUN(var.2)","JUN::JUNB","JUN::JUNB(var.2)","JUNB","JUNB(var.2)","JUND","JUND(var.2)","KAN1","KAN2","KAN4","Klf1","KLF10","KLF11","Klf12","KLF13","KLF14","KLF15","KLF16","KLF17","KLF2","KLF3","KLF4","KLF5","KLF6","KLF9","kni","Kr","KUA1","lab","LBD18","lbe","lbl","LBX1","LBX2","LCL1","LEC2","LEF1","LEP","LEU3","LFY","LHX1","LHX2","Lhx3","Lhx4","LHX5","LHX6","Lhx8","LHX9","LHY1","Lim1","Lim3","lim-4","lim-7","lin-14","LIN54","lin-54","lms","LMX1A","LMX1B","LYS14","M1BP","mab-3","mab-5","MAC1","Macho-1","Mad","MAF","MAF::NFE2","MAFA","Mafb","MAFF","MAFG","MAFK","MATALPHA2","MAX","MAX::MYC","MAZ","MBP1","MBP1::SWI6","MCM1","Mecom","MEF2A","MEF2B","MEF2C","MEF2D","MEIS1","MEIS1(var.2)","MEIS2","MEIS2(var.2)","MEIS3","MEOX1","MEOX2","MET28","MET31","MET32","MET4","MGA","MGA1","MGP","MIG1","MIG2","MIG3","mirr","MITF","mix-a","MIXL1","MLX","Mlxip","MLXIPL","MNB1A","MNT","MNX1","MOT2","MOT3","MSANTD3","MSC","MSGN1","msn-1","MSN2","MSN4","MSX1","MSX2","Msx3","MTF1","MXI1","MYB","myb.Ph3","MYB1","MYB101","MYB105","MYB111","MYB113","MYB118","MYB119","MYB124","MYB15","MYB24","MYB27","MYB3","MYB33","MYB3R1","MYB3R4","MYB3R5","MYB4","MYB46","MYB52","MYB55","MYB56","MYB57","MYB59","MYB62","MYB65","MYB70","MYB73","MYB77","MYB81","MYB98","MYBL1","MYBL2","MYC","MYC2","MYC3","MYC4","MYCN","MYF5","MYF6","MYOD1","MYOG","MYR2","MZF1","MZF1(var.2)","NAC017","NAC025","NAC028","NAC029","NAC043","NAC055","NAC058","NAC062","NAC078","NAC080","NAC083","NAC92","NCU00019","NCU02182","NDT80","NEUROD1","NEUROD2","NEUROG1","NEUROG2","NEUROG2(var.2)","NFAT5","NFATC1","NFATC2","NFATC3","NFATC4","NFE2","NFE2L1","Nfe2l2","NFIA","NFIB","NFIC","NFIC(var.2)","NFIC::TLX1","NFIL3","NFIX","NFIX(var.2)","NFKB1","NFKB2","NFYA","NFYB","NFYC","NHLH1","NHLH2","NHP10","NHP6A","NHP6B","nhr-6","nit-4","NK7.1","NKX2-2","NKX2-3","NKX2-5","Nkx2-5(var.2)","NKX2-8","Nkx3-1","Nkx3-2","NKX6-1","NKX6-2","NKX6-3","Nobox","NOTO","Npas2","NR1D1","NR1D2","NR1H2::RXRA", "SREBF1_22")
+
+#motifs <-  c("Nr1h3::Rxra","NR1H4","NR1H4::RXRA","NR1I2","NR1I3","NR2C1","NR2C2","NR2C2(var.2)","Nr2e1","Nr2e3","NR2F1","NR2F1(var.2)","NR2F1(var.3)","NR2F2","Nr2f6","Nr2f6(var.2)","NR2F6(var.3)","NR3C1","NR3C2","NR4A1","NR4A2","NR4A2::RXRA","NR5A1","Nr5a2","NR6A1","NRF1","NRG1","NRL","NSI1","NTL8","NTL9","nub","NUC","nuc-1","O2","OAF1","OBP1","OBP3","OBP4","oc","odd","OdsH","OJ1058_F05.8","OJ1581_H09.2","OLIG1","OLIG2","OLIG3","onecut","ONECUT1","ONECUT2","ONECUT3","opa","OPI1","Optix","Os05g0497200","OsI_08196","OSR1","OSR2","OsRR22","otp","OTX1","OTX2","ovo","OVOL1","OVOL2","P0510F09.23","pal-1","pan","PAX1","Pax2","PAX3","PAX3(var.2)","PAX4","PAX5","PAX6","PAX7","PAX9","pb","PBF","PBX1","PBX2","PBX3","Pdp1","PDR1","PDR3","PDR8","PDX1","PEND","pha-4","PHD1","PHDP","PHL1","PHL11","PHL12","PHL7","pho","PHO2","PHO4","PHOX2A","PHOX2B","PHYPADRAFT_140773","PHYPADRAFT_143875","PHYPADRAFT_153324","PHYPADRAFT_173530","PHYPADRAFT_182268","PHYPADRAFT_28324","PHYPADRAFT_38837","PHYPADRAFT_48267","PHYPADRAFT_64121","PHYPADRAFT_72483","PI","PIF1","PIF3","PIF4","PIF5","PIF7","PITX1","PITX2","PITX3","PKNOX1","PKNOX2","PLAG1","Plagl1","PLAGL2","PLT1","PLT3","pnr","POPTR_0002s00440g","POU1F1","POU2F1","POU2F2","POU2F3","POU3F1","POU3F2","POU3F3","POU3F4","POU4F1","POU4F2","POU4F3","POU5F1","Pou5f1::Sox2","POU5F1B","POU6F1","POU6F1(var.2)","POU6F2","PPARA::RXRA","PPARD","PPARG","Pparg::Rxra","Pph13","pqm-1","prd","PRDM1","Prdm15","PRDM4","PROP1","PROX1","PRRX1","PRRX2","PTF1","Ptf1a","Ptf1a(var.2)","Ptf1a(var.3)","Ptx1","PUCHI","PUT3","RAMOSA1","RAP1","RAP21","RAP2-1","RAP210","RAP2-10","RAP211","RAP212","RAP2-3","RAP26","RAP2-6","RARA","RARA(var.2)","RARA::RXRA","RARA::RXRG","Rarb","Rarb(var.2)","RARB(var.3)","Rarg","Rarg(var.2)","RARG(var.3)","RAV1","RAV1(var.2)","RAX","RAX2","RAX3","RBPJ","Rbpjl","RDR1","RDS1","RDS2","REB1","REF6","REI1","REL","RELA","RELB","repo","REST","RFX1","RFX1","RFX2","RFX3","RFX4","RFX5","RFX7","RGM1","RGT1","Rhox11","RHOXF1","RIM101","RLM1","RME1","ro","RORA","RORA(var.2)","RORB","RORC","ROX1","RPH1","RPN4","RREB1","RSC3","RSC30","rst2","RTG3","RUNX1","RUNX2","RUNX3","RVE1","RVE5","RVE6","RVE7","Rx","Rxra","RXRA::VDR","RXRB","RXRB(var.2)","RXRG","RXRG(var.2)")
+#motifs <-  c("schlank","Scr","SCRT1","SCRT2","sd","SEP1","SEP3","SFL1","SFP1","SGR5","SHOX","Shox2","SIP4","SIX1","SIX2","Six3","Six4","SIZF2","skn-1","SKN7","SKO1","slbo","slou","slp1","sma-4","Smad2::Smad3","SMAD2::SMAD3::SMAD4","SMAD3","Smad4","SMAD5","SMP1","SMZ","sna","SNAI1","SNAI2","SNAI3","snpc-4","SNT2","so","SOC1","SOHLH2","SOK2","SOL1","Sox1","SOX10","Sox11","SOX12","SOX13","SOX14","SOX15","Sox17","SOX18","SOX2","SOX21","Sox3","SOX4","Sox5","Sox6","SOX8","SOX9","SP1","SP2","SP3","SP4","SP8","SP9","SPDEF","SPI1","SPIB","SPIC","SPL1","SPL11","SPL12","SPL13","SPL14","SPL15","SPL3","SPL4","SPL5","SPL7","SPL8","SPL9","SPT","SPT15","SPT2","SPT23","Spz1","squamosa","SRD1","SREBF1","SREBF1(var.2)","SREBF2","SREBF2(var.2)","SRF","SRM1","SRY","STAT1","STAT1::STAT2","Stat2","STAT3","Stat4","Stat5a","Stat5a::Stat5b","Stat5b","Stat6","Stat92E","STB3","STB4","STB5","StBRC1","STE12","STP1","STP2","STP3","STP4","STZ","Su(H)","su(Hw)","SUM1","SUT1","SUT2","sv","SVP","SWI4","SWI5","T11I18.17","TAL1::TCF3","TB1","TBF1","TBP","TBP3","TBR1","TBS1","TBX1","TBX15","TBX18","TBX19","TBX2","TBX20","TBX21","TBX3","TBX4","TBX5","TBX6","TBXT","Tcf12","TCF12(var.2)","Tcf21","TCF21(var.2)","TCF3","TCF4","TCF7","TCF7L1","TCF7L2","TCFL5","TCP1","TCP14","TCP15","TCP16","TCP17","TCP19","TCP2","TCP20","TCP21","TCP23","TCP24","TCP3","TCP4","TCP5","TCP7","TCP8","TCX2","TCX3","TDA9","TEA1","TEAD1","TEAD2","TEAD3","TEAD4","TEC1","TEF","TFAP2A","TFAP2A(var.2)","TFAP2A(var.3)","TFAP2B","TFAP2B(var.2)","TFAP2B(var.3)","TFAP2C","TFAP2C(var.2)","TFAP2C(var.3)","TFAP2E","TFAP4","TFAP4(var.2)","TFCP2","TFDP1","TFE3","TFEB","TFEC","TGA1","TGA10","TGA1A","TGA2","TGA3","TGA4","TGA5","TGA6","TGA7","TGA9","TGIF1","TGIF2","TGIF2LX","TGIF2LY","THAP1","THAP11","THI2","THRB","THRB(var.2)","THRB(var.3)","tin","TINY","tll","TLX2","TOD6","TOS8","TP53","TP63","TP73","Trl","TRP1","TRP2","TSAR1","TSAR2","TSO1","ttk","tup","twi","TWIST1","Twist2","TYE7","Ubx","UGA3","UIF1","UME6","unc-30","unc-4","unc-62","unc-86","UNCX","UNE10","unpg","UPC2","URC2","USF1","USF2","usp","USV1","vab-7","VAX1","VAX2","VDR","VENTX","VEZF1","vfl","vis","vnd","Vsx1","VSX1","Vsx2","VSX2","vvl","wc-1","WRKY11","WRKY12","WRKY14","WRKY15","WRKY17","WRKY18","WRKY2","WRKY20","WRKY21","WRKY22","WRKY23","WRKY24","WRKY25","WRKY26","WRKY27","WRKY28","WRKY29","WRKY3","WRKY30","WRKY31","WRKY33","WRKY38","WRKY40","WRKY42","WRKY43","WRKY45","WRKY46","WRKY47","WRKY48","WRKY50","WRKY55","WRKY57","WRKY59","WRKY6","WRKY60","WRKY62","WRKY63","WRKY65","WRKY7","WRKY70","WRKY71","WRKY75","WRKY8","Wt1","XBP1","XBP1","YAP1","YAP3","YAP5","YAP6","YAP7","YER130C","YER184C","YGR067C","YHP1","YKL222C","YLL054C","YLR278C","YNR063W","YOX1","YPR013C","YPR015C","YPR022C","YPR196W","YRM1","YRR1","YY1","YY2","z","ZAP1","ZAP1","ZBED1","ZBTB12","ZBTB14","ZBTB18","ZBTB26","ZBTB32","ZBTB33","ZBTB6","ZBTB7A","ZBTB7B","ZBTB7C","ZEB1","zen","zen2","zfh-2","ZFP42","ZFP57","Zfx","ZHD1","ZHD3","ZHD5","ZHD6","ZIC1","Zic1::Zic2","Zic2","ZIC3","ZIC4","ZIC5","zip-8","ZKSCAN1","ZKSCAN5","ZMS1","ZNF135","ZNF136","ZNF140","ZNF143","ZNF148","ZNF16","ZNF24","ZNF263","ZNF274","Znf281","ZNF282","ZNF317","ZNF341","ZNF354C","ZNF382","ZNF384","ZNF410","Znf423","ZNF449","ZNF460","ZNF528","ZNF652","ZNF682","ZNF684","ZNF740","ZNF75D","ZSCAN29","ZSCAN4")
+
+
+set.seed(1)
+addArchRThreads(threads = 1)
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_5, 
+    groupBy = "Clusters2", 
+    geneSymbol = motifs, 
+    upstream = 50000,
+    downstream = 50000,
+    pal=customcolor_peak,
+    loops = getCoAccessibility(Differentiation_P_5)
+)
+
+grid::grid.newpage()
+grid::grid.draw(p$CD14)
+
+plotPDF(plotList = p, 
+    name = "5_Plot-Tracks-motifs_LIST-Genes-0.5-CoAccessibility.pdf", 
+    ArchRProj = Differentiation_P_5, 
+    addDOC = TRUE, width = 5, height = 5)
+```
+
+```{r Peak2GeneLinkage with ArchR} 
+Differentiation_P_5 <- addPeak2GeneLinks(
+    ArchRProj = Differentiation_P_5,
+    reducedDims = "IterativeLSI",
+    logFile = createLogFile("addPeak2GeneLinks")
+)
+metadata(Differentiation_P_5@peakSet)$Peak2GeneLink
+markerGenes1  <- c("POU5F1","NANOG")
+p2g <- getPeak2GeneLinks(
+    ArchRProj = Differentiation_P_5,
+    corCutOff = 0.4,
+    resolution = 1,
+    returnLoops = TRUE
+   
+)
+
+p2g[[1]]
+
+#metadata(p2g)[[1]]
+
+p2g <- getPeak2GeneLinks(
+    ArchRProj = Differentiation_P_5,
+    corCutOff = 0.5,
+    resolution = 10000,
+    returnLoops = TRUE
+    
+)
+
+p2g[[1]]
+
+
+```
+
+
+```{r Plotting browser tracks with peak-to-gene links, include=FALSE} 
+
+markerGenes2  <- c("POU5F1", "NANOG", "TDGF1", "GAL", "PODXL", "ID1", "MYC", "PAX6", "DNMT3B", "LIN28A", "FOXD3-AS1", "CD24", "EPCAM", "DPPA4", "FZD2", "NR6A1", "SOX21", "ZIC2", "SOX11", "HESX1", "MYLK", "IGFBP5", "FZD5", "FGF8", "SOX2", "RAX", "LIX1", "FEZF2", "POU3F1", "POU3F2", "NKX2-1", "ASCL1", "NEUROG1", "NEUROD1", "ISL1", "BSX", "HMX2", "OTP", "GSX1", "SF1", "GNRH1", "GRIA2", "L1CAM", "NHLH1", "ELAVL4", "SIX3", "SIX6", "OTX2", "TH", "INSM1", "ARX", "DBX1", "DCX", "DLL1", "DLX1", "DLX2", "DLX5", "DLX6", "GAD1", "GRIA1", "INA", "KIF19", "NEFL", "NEFM", "NEUROD4", "NSG2", "POU2F2", "RELN", "SCG2", "SIM1", "SIM2", "SNAP25", "SP9", "SST", "STMN2", "SYP", "SYT4", "TAC1", "TAGLN3", "TLX3", "NTRK1", "NTRK3", "PCSK2", "RET", "DLL3", "GAD2", "GAP43", "REST", "SOX3", "TUBB3", "HES1", "BMP4", "KLF15", "CDK1", "TYMS", "ANLN", "HES6", "LMO1", "ELAVL3", "PRRX1", "OTX2", "PCNA", "SPARCL1", "MAP6", "KRT18", "DDIT4", "PAMR1", "FOXH1", "FABP7", "RBFOX3", "SOX6", "CDH7", "CDH12", "PHC1", "PHC2", "YAF2", "CDH1", "CDH2", "GNG2", "EMX2", "CDK6", "TAGLN", "GNG8", "KLF11", "LHX9", "DCT", "VEPH1", "GNG3", "GNG11", "TRIM71", "SOX3", "KRT19", "NSG1", "JHY")
+
+p <- plotBrowserTrack(
+    ArchRProj = Differentiation_P_5, 
+    groupBy = "Clusters2", 
+    geneSymbol = markerGenes2, 
+    upstream = 50000,
+    downstream = 50000,
+    pal=customcolor_peak,
+    loops = getPeak2GeneLinks(Differentiation_P_5)
+)
+
+grid::grid.newpage()
+grid::grid.draw(p$POU5F1)
+grid::grid.draw(p$NANOG)
+grid::grid.draw(p$TDGF1)
+grid::grid.draw(p$JHY)
+
+plotPDF(plotList = p, 
+    name = "5_Plot-Tracks-Marker-Genes-with-Peak2GeneLinks.pdf", 
+    ArchRProj = Differentiation_P_5, 
+    addDOC = TRUE, width = 5, height = 5)
+
+#
+
+p <- plotPeak2GeneHeatmap(ArchRProj = Differentiation_P_5, groupBy = "Clusters2",seed = 1,
+  palATAC = paletteContinuous("coolwarm"),
+  palRNA = paletteContinuous("blueYellow"),)
+#p
+
+plotPDF(p, name = "5_Plot-Heatmap_peak2genelinks-scRNA_scATAC_blueyellow_purpleOrange.pdf", ArchRProj = Differentiation_P_5, addDOC = TRUE, width = 6, height = 16)
+
+
+```
+
+
+```{r Identification of Positive TF-Regulators,include=FALSE} 
+#Step 1. Identify Deviant TF Motifs
+
+seGroupMotif <- getGroupSE(ArchRProj = Differentiation_P_5, useMatrix = "MotifMatrix", groupBy = "Clusters2")
+
+seGroupMotif
+
+seZ <- seGroupMotif[rowData(seGroupMotif)$seqnames=="z",]
+
+rowData(seZ)$maxDelta <- lapply(seq_len(ncol(seZ)), function(x){
+  rowMaxs(assay(seZ) - assay(seZ)[,x])
+}) %>% Reduce("cbind", .) %>% rowMaxs
+
+#Step 2. Identify Correlated TF Motifs and TF Gene Score/Expression
+
+corGSM_MM <- correlateMatrices(
+    ArchRProj = Differentiation_P_5,
+    useMatrix1 = "GeneScoreMatrix",
+    useMatrix2 = "MotifMatrix",
+    reducedDims = "IterativeLSI"
+)
+
+corGSM_MM
+
+corGIM_MM <- correlateMatrices(
+    ArchRProj = Differentiation_P_5,
+    useMatrix1 = "GeneIntegrationMatrix",
+    useMatrix2 = "MotifMatrix",
+    reducedDims = "IterativeLSI"
+)
+
+corGIM_MM
+
+corGSM_MM$maxDelta <- rowData(seZ)[match(corGSM_MM$MotifMatrix_name, rowData(seZ)$name), "maxDelta"]
+corGIM_MM$maxDelta <- rowData(seZ)[match(corGIM_MM$MotifMatrix_name, rowData(seZ)$name), "maxDelta"]
+
+corGSM_MM <- corGSM_MM[order(abs(corGSM_MM$cor), decreasing = TRUE), ]
+corGSM_MM <- corGSM_MM[which(!duplicated(gsub("\\-.*","",corGSM_MM[,"MotifMatrix_name"]))), ]
+corGSM_MM$TFRegulator <- "NO"
+corGSM_MM$TFRegulator[which(corGSM_MM$cor > 0.5 & corGSM_MM$padj < 0.01 & corGSM_MM$maxDelta > quantile(corGSM_MM$maxDelta, 0.75))] <- "YES"
+sort(corGSM_MM[corGSM_MM$TFRegulator=="YES",1])
+
+#highligh TFs in a dot blot
+p <- ggplot(data.frame(corGSM_MM), aes(cor, maxDelta, color = TFRegulator)) +
+  geom_point() + 
+  theme_ArchR() +
+  geom_vline(xintercept = 0, lty = "dashed") + 
+  scale_color_manual(values = c("NO"="darkgrey", "YES"="firebrick3")) +
+  xlab("Correlation To Gene Score") +
+  ylab("Max TF Motif Delta") +
+  scale_y_continuous(
+    expand = c(0,0), 
+    limits = c(0, max(corGSM_MM$maxDelta)*1.05)
+  )
+
+
+
+plotPDF(plotList =p,name="5_correlationtogenesTFregulators_motifs.pdf", ArchRProj = Differentiation_P_5, addDOC = TRUE, width = 5, height = 5)
+dev.off()
+corGIM_MM <- corGIM_MM[order(abs(corGIM_MM$cor), decreasing = TRUE), ]
+corGIM_MM <- corGIM_MM[which(!duplicated(gsub("\\-.*","",corGIM_MM[,"MotifMatrix_name"]))), ]
+corGIM_MM$TFRegulator <- "NO"
+corGIM_MM$TFRegulator[which(corGIM_MM$cor > 0.5 & corGIM_MM$padj < 0.01 & corGIM_MM$maxDelta > quantile(corGIM_MM$maxDelta, 0.75))] <- "YES"
+sort(corGIM_MM[corGIM_MM$TFRegulator=="YES",1])
+
+p <- ggplot(data.frame(corGIM_MM), aes(cor, maxDelta, color = TFRegulator)) +
+  geom_point() + 
+  theme_ArchR() +
+  geom_vline(xintercept = 0, lty = "dashed") + 
+  scale_color_manual(values = c("NO"="darkgrey", "YES"="firebrick3")) +
+  xlab("Correlation To Gene Expression") +
+  ylab("Max TF Motif Delta") +
+  scale_y_continuous(
+    expand = c(0,0), 
+    limits = c(0, max(corGIM_MM$maxDelta)*1.05)
+  )
+
+p
+plotPDF(plotList = p, 
+    name = "5_Plot-positive_tf_regulator.pdf", 
+    ArchRProj = Differentiation_P_5, 
+    addDOC = TRUE, width = 5, height = 5)
+p
+write.csv(corGSM_MM, "5_positive_matrix_tf_regulator.csv", sep = "\t")
+
+```
+
+```{r ID marker peaks} 
+#
+markersPM <- getMarkerFeatures(
+    ArchRProj = Differentiation_P_5, 
+    useMatrix = "PeakMatrix", 
+    groupBy = "Clusters2",
+    bias = c("log10(nFrags)"),
+    testMethod = "wilcoxon"
+)
+markerListPM <- getMarkers(markersPM, cutOff = "FDR <= 0.01 & Log2FC >= 0.25")
+Cluster_marker_list_PM <- write.csv(markerListPM, "5_ATAC_cluster_marker_list_PM.csv", sep = "\t")
+
+
+#saveArchRProject(ArchRProj = Differentiation_P_5, outputDirectory = "Save-Differentiation_P_5", load = FALSE)
+#saveRDS(Differentiation_P_5, file = "ARCHR_PART5_FINAL_end_of_pipeline.rds")
+
+```
+
+```{r ID marker peaks,include=FALSE} 
+
+
+p6 <- plotEmbedding(ArchRProj = Differentiation_P_5, colorBy = "cellColData", name = "Clusters2", embedding = "UMAP")
+
+p6
+
+trajectory <- c("R0","R2","R7","R9","R12")
+trajectory
+
+
+
+Diff_P_5 <- addTrajectory(
+    ArchRProj = Differentiation_P_5, 
+    name = "Differentiation", 
+    groupBy = "Clusters2",
+    trajectory = trajectory, 
+    embedding = "UMAP", 
+    force = TRUE,
+)
+head(Diff_P_5$Differentiation[!is.na(Diff_P_5$Differentiation)])
+
+p <- plotTrajectory(Diff_P_5, trajectory = "Differentiation", colorBy = "cellColData", name = "Differentiation",size=0.3)
+
+p[[1]]
+plotPDF(p, name = "Plot-Differentiation-Traj-UMAP_cell_Coldata.pdf", ArchRProj = Diff_P_5, addDOC = TRUE, width = 5, height = 5)
+
+
+Diff_P_5 <- addImputeWeights(Diff_P_5)
+p1 <- plotTrajectory(Diff_P_5, trajectory = "Differentiation", colorBy = "GeneScoreMatrix", name = "DLX1", continuousSet = "horizonExtra")
+p1
+
+p2 <- plotTrajectory(Diff_P_5, trajectory = "Differentiation", colorBy = "GeneIntegrationMatrix", name = "DLX1", continuousSet = "blueYellow")
+
+ggAlignPlots(p1[[1]], p2[[1]], type = "h")
+
+
+plotPDF(p1[[1]], p2[[1]], name = "Plot-Differentiation-Traj-UMAP_DLX1_gene_score_and_GeneIntegrationmatrix.pdf", ArchRProj = Diff_P_5, addDOC = TRUE, width = 5, height = 5)
+
+
+
+
+
+trajMM  <- getTrajectory(ArchRProj = Diff_P_5, name = "Differentiation", useMatrix = "MotifMatrix", log2Norm = FALSE)
+p1 <- plotTrajectoryHeatmap(trajMM, pal = paletteContinuous(set = "solarExtra"))
+trajGSM <- getTrajectory(ArchRProj = Diff_P_5, name = "Differentiation", useMatrix = "GeneScoreMatrix", log2Norm = TRUE)
+p2 <- plotTrajectoryHeatmap(trajGSM,  pal = paletteContinuous(set = "horizonExtra"))
+p2
+trajGIM <- getTrajectory(ArchRProj = Diff_P_5, name = "Differentiation", useMatrix = "GeneIntegrationMatrix", log2Norm = FALSE)
+
+p3 <- plotTrajectoryHeatmap(trajGIM,  pal = paletteContinuous(set = "blueYellow"))
+
+trajPM  <- getTrajectory(ArchRProj = Diff_P_5, name = "Differentiation", useMatrix = "PeakMatrix", log2Norm = TRUE)
+
+p4 <- plotTrajectoryHeatmap(trajPM, pal = paletteContinuous(set = "solarExtra"))
+
+plotPDF(p1, p2, p3, p4, name = "6_Plot-DIfferentiation-Traj-Heatmaps.pdf", ArchRProj = Differentiation_P_5, addDOC = TRUE, width = 6, height = 8)
+
+corGSM_MM <- correlateTrajectories(trajGSM, trajMM)
+
+corGSM_MM[[1]]
+
+trajGSM2 <- trajGSM[corGSM_MM[[1]]$name1, ]
+trajMM2 <- trajMM[corGSM_MM[[1]]$name2, ]
+
+
+trajCombined <- trajGSM2
+
+assay(trajCombined,withDimnames=FALSE) <- t(apply(assay(trajGSM2), 1, scale)) + t(apply(assay(trajMM2), 1, scale))
+
+combinedMat <- plotTrajectoryHeatmap(trajCombined, returnMat = TRUE, varCutOff = 0)
+
+rowOrder <- match(rownames(combinedMat), rownames(trajGSM2))
+
+ht1 <- plotTrajectoryHeatmap(trajGSM2,  pal = paletteContinuous(set = "horizonExtra"),  varCutOff = 0, rowOrder = rowOrder)
+
+ht2 <- plotTrajectoryHeatmap(trajMM2, pal = paletteContinuous(set = "solarExtra"), varCutOff = 0, rowOrder = rowOrder)
+ht1 + ht2
+
+plotPDF(ht1 + ht2, name = "6_Plot-DIfferentiation-Traj_combined_mat_GeneScore_Motif_Matrix_Heatmaps.pdf", ArchRProj = Differentiation_P_5, addDOC = TRUE, width = 6, height = 8)
+corGIM_MM <- correlateTrajectories(trajGIM, trajMM)
+corGIM_MM[[1]]
+
+trajGIM2 <- trajGIM[corGIM_MM[[1]]$name1, ]
+trajMM2 <- trajMM[corGIM_MM[[1]]$name2, ]
+
+trajCombined <- trajGIM2
+assay(trajCombined,withDimnames=FALSE) <- t(apply(assay(trajGIM2), 1, scale)) + t(apply(assay(trajMM2), 1, scale))
+
+combinedMat <- plotTrajectoryHeatmap(trajCombined, returnMat = TRUE, varCutOff = 0)
+
+rowOrder <- match(rownames(combinedMat), rownames(trajGIM2))
+ht1 <- plotTrajectoryHeatmap(trajGIM2,  pal = paletteContinuous(set = "blueYellow"),  varCutOff = 0, rowOrder = rowOrder)
+ht2 <- plotTrajectoryHeatmap(trajMM2, pal = paletteContinuous(set = "solarExtra"), varCutOff = 0, rowOrder = rowOrder)
+ht1 + ht2
+plotPDF(ht1 + ht2, name = "6_Plot-DIfferentiation-Traj_Combined_correlate_GeneScore_Motif_Matrix_Heatmaps.pdf", ArchRProj = Differentiation_P_5, addDOC = TRUE, width = 6, height = 8)
+
+
+saveArchRProject(ArchRProj = Diff_P_5, outputDirectory = "Save-Differentiation_P_5", load = FALSE)
+```
+
+
+
+
+```{r map ATAC peak matrixes form MASCS with TAD bedfiles by LOLA} 
+#Differentiation_P_5<-readRDS("ARCHR_PART5_FINAL_end_of_pipeline.rds")
+
+#PEAKS
+getTADpositions<-readRDS("/Users/ankushs/Desktop/MERGED_DIFF_ARCHR/Save-Differentiation_P_5/PeakCalls/R0-reproduciblePeaks.gr.rds")
+
+df <- data.frame(seqnames=seqnames(getTADpositions),
+  starts=start(getTADpositions)-1,
+  ends=end(getTADpositions),
+  names=c(rep(".", length(getTADpositions))),
+  scores=c(rep(".", length(getTADpositions))),
+  strands=strand(getTADpositions),
+data=elementMetadata(getTADpositions))
+
+
+write.table(df, file="R0_Clusters.bed", quote=F, sep="\t", row.names=F)
+
+getTADpositions<-readRDS("/Users/ankushs/Desktop/MERGED_DIFF_ARCHR/Save-Differentiation_P_5/PeakCalls/R2-reproduciblePeaks.gr.rds")
+df <- data.frame(seqnames=seqnames(getTADpositions),
+  starts=start(getTADpositions)-1,
+  ends=end(getTADpositions),
+  names=c(rep(".", length(getTADpositions))),
+  scores=c(rep(".", length(getTADpositions))),
+  strands=strand(getTADpositions),
+data=elementMetadata(getTADpositions))
+
+write.table(df, file="R2_Clusters.bed", quote=F, sep="\t", row.names=F)
+getTADpositions<-readRDS("/Users/ankushs/Desktop/MERGED_DIFF_ARCHR/Save-Differentiation_P_5/PeakCalls/R7-reproduciblePeaks.gr.rds")
+df <- data.frame(seqnames=seqnames(getTADpositions),
+  starts=start(getTADpositions)-1,
+  ends=end(getTADpositions),
+  names=c(rep(".", length(getTADpositions))),
+  scores=c(rep(".", length(getTADpositions))),
+  strands=strand(getTADpositions),
+data=elementMetadata(getTADpositions))
+
+write.table(df, file="R7_Clusters.bed", quote=F, sep="\t", row.names=F)
+
+getTADpositions<-readRDS("/Users/ankushs/Desktop/MERGED_DIFF_ARCHR/Save-Differentiation_P_5/PeakCalls/R9-reproduciblePeaks.gr.rds")
+df <- data.frame(seqnames=seqnames(getTADpositions),
+  starts=start(getTADpositions)-1,
+  ends=end(getTADpositions),
+  names=c(rep(".", length(getTADpositions))),
+  scores=c(rep(".", length(getTADpositions))),
+  strands=strand(getTADpositions),
+data=elementMetadata(getTADpositions))
+
+write.table(df, file="R9_Clusters.bed", quote=F, sep="\t", row.names=F)
+
+getTADpositions<-readRDS("/Users/ankushs/Desktop/MERGED_DIFF_ARCHR/Save-Differentiation_P_5/PeakCalls/R12-reproduciblePeaks.gr.rds")
+df <- data.frame(seqnames=seqnames(getTADpositions),
+  starts=start(getTADpositions)-1,
+  ends=end(getTADpositions),
+  names=c(rep(".", length(getTADpositions))),
+  scores=c(rep(".", length(getTADpositions))),
+  strands=strand(getTADpositions),
+data=elementMetadata(getTADpositions))
+
+write.table(df, file="R12_Clusters.bed", quote=F, sep="\t", row.names=F)
+
+saveRDS(Differentiation_P_5, file = "ARCHR_PART6_FINAL_end_of_pipeline.rds")
+
+#END OF THE PIPELINE
+
+```
+
+
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
