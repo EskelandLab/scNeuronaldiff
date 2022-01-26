@@ -1365,8 +1365,17 @@ for (i in seq_along(top_genes)) {
 sessionInfo()
 ```
 
+```{r Cleaning up for Shiny, echo=TRUE, message=FALSE, warning=FALSE}
+
+#Removing these variables
+diffscRNA.hESC[['old.ident']] <- NULL
+diffscRNA.hESC[["name_number_seurat_clusters"]]<-NULL
+diffscRNA.hESC[["original_seurat_clusters"]]<-NULL
+
+```
+
 ```{r SAVE RDS_FINAL, echo=TRUE, message=FALSE, warning=FALSE}
-saveRDS(diffscRNA.hESC, paste0(currentjob,"_EndofPipe_Final_rnaobjects.qcFilt_shinyapp.rds"))
+saveRDS(diffscRNA.hESC,paste0(currentjob,"_EndofPipe_Final_rnaobjects.qcFilt_shinyapp.rds"))
 ```
 
 #Credits
