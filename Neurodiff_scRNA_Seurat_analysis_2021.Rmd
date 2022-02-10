@@ -341,7 +341,7 @@ DimPlot(diffscRNA, label = TRUE, label.size = 5, reduction = 'umap', group.by = 
 
 
 #ASSIGNING COLORS
-DimPlot(diffscRNA, label = TRUE, label.size = 5, reduction = 'umap', group.by = 'orig.ident', cols = c('d1-ASC' = '#ffd700', 'd0_ASC' = '#8b9dc3', 'd3-ASC' = '#ff7f50', 'd_2-ASC' = 'black', 'd1-LS1' = '#ffd700', 'd0_LS1' = '#008080', 'd3-LS1' = '#f30000', 'd_2-LS1' = '#e0e6b0'))
+DimPlot(diffscRNA, label = TRUE, label.size = 5, reduction = 'umap', group.by = 'orig.ident',  cols =c('D0' = '#FF9888', 'D7' = '#B60A1C','D13' = '#C3CE3D','D20' = '#C0D6E4'))
         
 dev.copy(pdf,paste0(currentjob,"_5.UMAP.BYorigin.pdf"), height=5, width=8)
 dev.off()
