@@ -1,0 +1,3318 @@
+---
+title: "Methylation-analysis"
+author: "Mari Spildrejorde"
+date: "10/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, root.dir ="/MethData", echo = TRUE)
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+#BiocManager::install("RnBeads")
+library(RnBeads)
+#install.packages("knitr")
+library(knitr)
+library(limma)
+#BiocManager::install("minfi")
+#BiocManager::install("rhdf5")
+library(minfi)
+#BiocManager::install("IlluminaHumanMethylationEPICmanifest")
+library(IlluminaHumanMethylationEPICmanifest)
+#library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(RColorBrewer)
+#BiocManager::install("missMethyl")
+library(missMethyl)
+#BiocManager::install("DMRcate")
+library(DMRcate)
+library(stringr)
+library(ggplot2)
+library(reshape2)
+#install.packages("devtools")
+library(devtools)
+#BiocManager::install("minfiData")
+library(minfiData)
+#devtools::install_github("markgene/maxprobes")
+library("maxprobes")
+#install.packages("remotes")
+library(remotes)
+#install.packages("rapportools")
+library(rapportools)
+library(dplyr)
+#install.packages("tidyverse")
+library(tidyverse)
+library(gplots)
+#BiocManager::install("ChAMP")
+library(ChAMP)
+#install.packages("ggrepel")
+library(ggrepel)
+library(colorspace)
+#BiocManager::install("methylGSA")
+library(methylGSA)
+library("ggforce")
+library(GenomicFeatures)
+#BiocManager::install("ggbio")
+library(ggbio)
+#BiocManager::install("Homo.sapiens")
+library(Homo.sapiens)
+library(biovizBase)
+#BiocManager::install("GenomicRanges")
+library("GenomicRanges")
+#install_github("achilleasNP/IlluminaHumanMethylationEPICanno.ilm10b5.hg38")
+library(IlluminaHumanMethylationEPICanno.ilm10b5.hg38)
+library(ensembldb)
+#BiocManager::install("EnsDb.Hsapiens.v86")
+library(EnsDb.Hsapiens.v86) # this pkg is about 75 Mb
+#install_github("jokergoo/ComplexHeatmap", force = TRUE)
+library(ComplexHeatmap)
+#install.packages(c("FactoMineR", "factoextra"))
+library("FactoMineR")
+library("factoextra")
+library(ggpubr)
+library(circlize)
+#install.packages("ggthemes")
+library(ggthemes)
+#if (!require(devtools)) install.packages("devtools")
+#devtools::install_github("yanlinlin82/ggvenn") 
+library(ggvenn)
+library(EnhancedVolcano)
+
+daycols = daycols
+```
+
+
+# Load data
+
+```{r Read in data, warning=FALSE}
+baseDir = system.file("/MethData/idat")
+
+targets = read.metharray.sheet("/MethData/idat") # put samplesheet with iDat files
+
+rgSet = read.metharray.exp(targets=targets)
+#rgSet
+
+sampleNames(rgSet) = targets$Sample_Name # give the samples discriptive names
+#rgSet
+#save(rgSet, file = "/MethData/analysis/rgSet.RData")
+```
+
+# Annotation
+
+```{r get annotation for downstream analysis}
+
+rgSet@annotation = c(array = "IlluminaHumanMethylationEPIC", annotation = "ilm10b5.hg38")
+
+# get the EPIC annotation data
+annoEPIC = getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b5.hg38)
+
+#head(annoEPIC)
+annoEPIC = as.data.frame(annoEPIC)
+annoEPIC$cgid=row.names(annoEPIC)
+
+```
+
+# Quality Control
+
+```{r QC}
+# calculate the detection p-values
+detP = detectionP(rgSet)
+#head(detP)
+
+# complete QC pipeline in Minfi and generate QC report
+qcReport(rgSet, sampNames=targets$Sample_Name, sampGroups=targets$timepoint, pdf="qcReport.pdf") # can also specify sampGroups=targets$Group
+
+# remove poor quality samples
+keep = colMeans(detP) < 0.05
+rgSet = rgSet[,keep]
+rgSet
+
+# remove poor quality samples from targets data
+targets = targets[keep,]
+#targets[,1:5]
+
+# remove poor quality samples from detection p-value table
+detP = detP[,keep]
+dim(detP)
+
+```
+
+# Normalization
+
+```{r Normalization}
+# normalize the data; this results in a GenomicRatioSet object
+# Functional normalization 
+# Note that this algorithm does not rely on any assumption and therefore can be be applicable for 
+# cases where global changes are expected such as in cancer-normal comparisons or tissue differences.
+
+mSetSq = preprocessFunnorm(rgSet) 
+
+# create a MethylSet object from the raw data for plotting
+mSetRaw = preprocessRaw(rgSet)
+
+```
+
+# Explore data
+
+```{r Explore data - PCA}
+
+par(mfrow=c(1,2))
+pal25 = c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70", "khaki2",
+  "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+  "darkturquoise", "green1", "yellow4", "yellow3",
+  "darkorange4", "brown"
+)
+
+plotMDS(getM(mSetRaw), top=1000, gene.selection="common", main = "raw, unfiltered, colored by timepoint",
+        col=daycols[factor(targets$timepoint)])
+
+plotMDS(getM(mSetRaw), top=1000, gene.selection="common", main = "raw, unfiltered, colored by slide", 
+        col=pal25[factor(targets$Slide)])
+
+
+```
+
+# Filter probes
+
+```{r Filtering}
+# ensure probes are in the same order in the mSetSq and detP objects
+detP = detP[match(featureNames(mSetSq),rownames(detP)),] 
+
+# remove any probes that have failed in one or more samples
+keep = rowSums(detP < 0.01) == ncol(mSetSq) 
+table(keep)
+
+mSetSqFlt = mSetSq[keep,]
+mSetSqFlt 
+
+# remove any probes that have failed in detP
+detP= detP[keep,]
+dim(detP)
+
+# exclude cross reactive probes 
+xloci = maxprobes::xreactive_probes(array_type = "EPIC")
+length(xloci) # 43256
+
+keep = !(featureNames(mSetSqFlt) %in% xloci)
+table(keep)
+
+
+mSetSqFlt = mSetSqFlt[keep,] 
+mSetSqFlt 
+
+#save(mSetSqFlt, file="/mSetSqFlt.RData")
+#load("/mSetSqFlt.RData")
+
+# exclude cross reactive probes in detP
+detP= detP[keep,]
+dim(detP)
+
+# visualize MDS after filtering
+par(mfrow=c(1,3))
+plotMDS(getM(mSetSq), top=1000, gene.selection="common", main = "Normalized, unfiltered, colored by slide",
+        col=pal25[factor(targets$Slide)])
+
+limma::plotMDS(getM(mSetSqFlt), top=1000, gene.selection="common", main = "Normalized, filtered, colored by slide",
+        col=pal25[factor(targets$Slide)])
+
+plotMDS(getM(mSetSqFlt), top=1000, gene.selection="common", main = "Normalized, filtered, colored by timepoint",
+        col=daycols[factor(targets$timepoint)])
+
+```
+
+# Calculate m-values and beta-values
+
+```{r Calculate m-vals and betas}
+##-----------------------------------------------
+# calculate M-values for statistical analysis and 
+# beta values for downstream plotting
+##-----------------------------------------------
+mVals = getM(mSetSqFlt)
+head(mVals[,1:5])
+
+betas = getBeta(mSetSqFlt)
+head(betas[,1:5])
+
+annoEPICsub <- annoEPIC[match(rownames(mVals),annoEPIC$Name),
+                        c(1:4,9, 12:19,22,24, 26, 31,37,49:ncol(annoEPIC))]
+#head(annoEPICsub)
+
+nonCpG = annoEPIC[grepl("ch",annoEPIC$Name),] #Vector of non-CpG IDs
+
+
+#PLOT PCA
+pdf("PCA-timepoints.pdf")
+limma::plotMDS(mVals, top=1000, gene.selection="common", main = "Normalized, filtered, colored by timepoint",
+        col=daycols[factor(targets$timepoint)])
+dev.off()
+
+pdf("PCAplot_day.pdf", width = 7, height = 7)
+limma::plotMDS(mVals, top=1000, gene.selection="common", main = "Normalized, filtered, colored by timepoint",
+        col=daycols[factor(targets$timepoint)],  pch = 16, cex = 2)
+dev.off()
+
+```
+
+# Differential methylation of control samples
+```{r Differential methylation CONTROL SAMPLES}
+## Probewise differential methylation analyses using limma
+#Groups as factors
+targets$timepoint = factor(targets$timepoint, levels = c("0", "7", "13", "20")) 
+targets$Group = factor(targets$Group, levels = c("Control_day_0","Control_day_7","Control_day_13","Control_day_20")) 
+
+# use the above to create a design matrix
+design_ctr = model.matrix(~0+timepoint, data=targets)
+
+# fit the linear model 
+fit = lmFit(mVals, design_ctr)
+
+# create a contrast matrix for specific comparisons
+contMatrix = makeContrasts(
+  ctrbaselineTo7days = timepoint7 - timepoint0,
+  ctrbaselineTo13days = timepoint13 - timepoint0,
+  ctrbaselineTo20days = timepoint20 - timepoint0,
+  ctr7to13days = timepoint13 - timepoint7,
+  ctr7to20days = timepoint20 - timepoint7,
+  ctr13to20days = timepoint20 - timepoint13,
+  levels=design_ctr)
+
+# fit the contrasts
+fit2 = contrasts.fit(fit, contMatrix)
+fit2 = eBayes(fit2)
+
+## look at the numbers of DM CpGs at FDR < 0.01 
+# method = "separate": equivalent to using topTable separately for each coefficient in the linear model fit
+results = decideTests(fit2, method="separate", p.value = 0.01)
+summary(results)
+
+
+vennDiagram(results[,1:3], cex = c(0.7), include=c("up", "down"), circle.col = c("#999999", "#E69F00", "#56B4E9"), names = c("Day 0 vs day 7", "Day 0 vs day 13", "Day 0 vs day 20"))
+dev.copy(pdf,paste0("VennDiagram.Meth.pdf"),height = 6, width = 6, paper='special')
+dev.off()
+
+vennDiagram(results[,1:3], cex = c(0.8), include=c("both"), circle.col = c("#999999", "#E69F00", "#56B4E9"), names = c("Day 0 vs day 7", "Day 0 vs day 13", "Day 0 vs day 20"))
+dev.copy(pdf,paste0("VennDiagram.Methb.pdf"),height = 6, width = 6, paper='special')
+dev.off()
+
+vennDiagram(results[,4:6], cex = c(0.9,1,1), include=c("up", "down"), circle.col = c("steelblue4", "lightgoldenrod", "palevioletred"))
+vennDiagram(results[,1:5], cex = c(0.9,1,1), include=c("both"), circle.col = c("steelblue4", "lightgoldenrod", "palevioletred", "mediumseagreen", "royalblue4"))
+vennDiagram(results[,2:6], cex = c(0.9,1,1), include=c("both"), circle.col = c("steelblue4", "lightgoldenrod", "palevioletred", "mediumseagreen", "royalblue4"))
+
+resultsmatrix_d0d13d20 = results[,1:3]
+up = vennCounts(results[,1:3], include="up")
+down = vennCounts(results[,1:3], include="down")
+both = vennCounts(results[,1:3], include="both")
+
+x <- list(
+  "Day 0 vs day 7" = which(results[,1] != 0), 
+  "Day 0 vs day 13" = which(results[,2] != 0), 
+  "Day 0 vs day 20" = which(results[,3] != 0)
+  )
+
+ggvenn(
+  x, 
+  fill_color = c("#0073C2FF", "#EFC000FF", "#868686FF"),
+  stroke_size = 0.5, set_name_size = 4, text_size = 3)
+dev.copy(pdf,paste0("VennDiagram.Meth_percet.pdf"),height = 6, width = 6, paper='special')
+dev.off()
+```
+
+
+
+## Find significant CpG-sites
+
+```{r Find significant CpG-sites}
+
+# differences baseline to 7 days
+t_b_7 = topTable(fit2, coef="ctrbaselineTo7days", n=Inf, genelist= annoEPICsub, sort.by="p") 
+r_b_7 = t_b_7[which(t_b_7$adj.P.Val < 0.01),] 
+#head(r_b_7)
+write.table(r_b_7, file="sig_b_7.csv", sep=",", row.names=FALSE)
+
+# differences baseline to 13 days
+t_b_13 = topTable(fit2, coef="ctrbaselineTo13days", n=Inf,genelist= annoEPICsub, sort.by="p") 
+r_b_13 = t_b_13[which(t_b_13$adj.P.Val < 0.01),]
+write.table(r_b_13, file="sig_b_13.csv", sep=",", row.names=FALSE)
+
+# differences baseline to 20 days
+t_b_20 = topTable(fit2, coef="ctrbaselineTo20days", n=Inf, genelist= annoEPICsub, sort.by="p") 
+r_b_20 = t_b_20[which(t_b_20$adj.P.Val < 0.01),]
+#head(r_b_20)
+write.table(r_b_20, file="sig_b_20.csv", sep=",", row.names=FALSE)
+
+# differences day 7 to 13 days
+t_7_13 = topTable(fit2, coef="ctr7to13days", n=Inf, genelist= annoEPICsub, sort.by="p") 
+r_7_13 = t_7_13[which(t_7_13$adj.P.Val < 0.01),]
+write.table(r_7_13, file="sig_7_13.csv", sep=",", row.names=FALSE)
+
+# differences day 7 to 20 days
+t_7_20 = topTable(fit2, coef="ctr7to20days", n=Inf, genelist= annoEPICsub, sort.by="p") 
+r_7_20 = t_7_20[which(t_7_20$adj.P.Val < 0.01),]
+write.table(r_7_20, file="sig_7_20.csv", sep=",", row.names=FALSE)
+
+# differences day 13 to 20 days
+t_13_20 = topTable(fit2, coef="ctr13to20days", n=Inf, genelist= annoEPICsub, sort.by="p") 
+r_13_20 = t_13_20[which(t_13_20$adj.P.Val < 0.01),]
+write.table(r_13_20, file="sig_13_20.csv", sep=",", row.names=FALSE)
+
+
+```
+
+## Calculate average betas
+
+```{r Calculate average betas }
+
+betas_ctr_df = as.data.frame(betas) #gjør om matrix til data frame
+
+#Charachter with samples names for each day
+d0 = targets$Sample_Name[targets$timepoint == "0"]
+d7 = targets$Sample_Name[targets$timepoint == "7"]
+d13 = targets$Sample_Name[targets$timepoint == "13"]
+d20 = targets$Sample_Name[targets$timepoint == "20"]
+
+
+#Calculate average beta values per day
+d0_avg_beta = as.data.frame(rowMeans(betas_ctr_df[, d0], na.rm = TRUE)) 
+colnames(d0_avg_beta) = "Day_0_control" #Angi kolonnenavn
+
+d7_avg_beta = as.data.frame(rowMeans(betas_ctr_df[, d7], na.rm = TRUE))
+colnames(d7_avg_beta) = "Day_7_control"
+
+d13_avg_beta = as.data.frame(rowMeans(betas_ctr_df[, d13], na.rm = TRUE))
+colnames(d13_avg_beta) = "Day_13_control"
+
+d20_avg_beta = as.data.frame(rowMeans(betas_ctr_df[, d20], na.rm = TRUE))
+colnames(d20_avg_beta) = "Day_20_control"
+
+#Merge mean betavalues for each group to one df
+avg.betas = cbind(d0_avg_beta, d7_avg_beta, d13_avg_beta, d20_avg_beta)
+
+save(t_b_7, r_b_7, t_b_13, r_b_13, t_b_20, r_b_20, t_7_13, r_7_13, t_7_20, r_7_20, t_13_20, r_13_20, avg.betas, d0_avg_beta, d7_avg_beta, d13_avg_beta, d20_avg_beta, file = "/DMresults.RData")
+```
+
+
+# Visualize results
+##Distribution density plot
+```{r global distrbution of beta values}
+annoEPICsub2 = subset(annoEPICsub, select = c("Type"))
+targets_ctr_small = subset(targets, select = c(Sample_Name, timepoint))
+
+#Annotate beta df and make into long format
+betas_ctr_df2 = cbind(betas_ctr_df, annoEPICsub2)
+betas_ctr_df_long = betas_ctr_df2 %>%  pivot_longer(cols = !"Type", names_to = "Sample_Name", values_to = "beta")
+betas_ctr_df_long2 = merge(betas_ctr_df_long, targets_ctr_small, by = "Sample_Name")
+levels(betas_ctr_df_long2$timepoint)
+
+ggplot(betas_ctr_df_long2, aes(x = beta, col = timepoint)) +
+  geom_density() + 
+  scale_color_manual(values = daycols) +
+  facet_wrap(~ Type)+
+  theme_minimal()
+dev.copy(pdf,paste0("densityDistributionBetasByProbe.pdf"),height = 5, paper='special')
+dev.off()
+
+ggplot(betas_ctr_df_long2, aes(x = beta, col = timepoint)) +
+  geom_density() + 
+  scale_color_manual(values = daycols) +
+  theme_minimal()
+dev.copy(pdf,paste0("densityDistributionBetas.pdf"),height = 5, paper='special')
+dev.off()
+
+ggplot(betas_ctr_df_long2, aes(x = beta, fill = timepoint)) +
+  geom_histogram(position = "stack", col = "Black") +
+  facet_wrap(~ Type)+
+  scale_fill_manual(values = daycols) +
+  theme_minimal()
+dev.copy(pdf,paste0("densityHistoDistributionBetasByProbe.pdf"),height = 5, paper='special')
+dev.off()
+
+ggplot(betas_ctr_df_long2, aes(x = beta)) +
+  geom_histogram(aes(fill = timepoint), col = "Black") +
+  geom_text(stat='count', aes(label=..count..), position = position_stack(vjust = 0.5),size=4) +
+  scale_fill_manual(values =daycols) +
+  theme_minimal()
+dev.copy(pdf,paste0("densityHistoDistributionBetas.pdf"),height = 5, paper='special')
+dev.off()
+
+ggplot(betas_ctr_df_long2) +
+  geom_histogram(aes(fill = timepoint, x = beta, y = stat(count)), col = "Black", binwidth = 0.1, position=position_dodge()) +
+  scale_fill_manual(values = daycols) +
+  theme_minimal()
+dev.copy(pdf,paste0("densityHistoDistributionBetas-notstacked.pdf"),height = 5, paper='special')
+dev.off()
+
+#cairo_pdf("Box_bins2.pdf", height = 5, width = 7, fallback_resolution = 300)
+betas_ctr_df_long2 %>% mutate(bin = cut_width(beta, width = 0.25, boundary = 0)) %>% 
+ggplot(.) +
+  geom_boxplot(aes(fill = timepoint, x = bin, y = beta))+
+  scale_fill_manual(values = daycols) +
+theme_minimal()
+dev.copy(cairo_pdf,paste0("Box_bins.pdf"),height = 5, fallback_resolution = 300)
+dev.off()
+
+
+#non-CpG distribution
+betas_ctr_df3 = betas_ctr_df 
+betas_ctr_df3$cgid = rownames(betas_ctr_df3)
+betas_ctr_df3 = betas_ctr_df3 %>% dplyr::filter(cgid %in% nonCpG$cgid)
+
+betas_ctr_df_long2 = betas_ctr_df3 %>%  pivot_longer(cols = !"cgid", names_to = "Sample_Name", values_to = "beta")
+betas_ctr_df_long2 = merge(betas_ctr_df_long2, targets_ctr_small, by = "Sample_Name")
+levels(betas_ctr_df_long2$timepoint)
+
+#cairo_pdf("Box_bins_NON-CpGs.pdf", height = 5, width = 7, fallback_resolution = 300)
+betas_ctr_df_long2 %>% mutate(bin = cut_width(beta, width = 0.25, boundary = 0)) %>% 
+ggplot(.) +
+  geom_boxplot(aes(fill = timepoint, x = bin, y = beta))+
+  scale_fill_manual(values = daycols) +
+theme_minimal()
+dev.copy(cairo_pdf,paste0("Box_bins__NON-CpGs.pdf"),height = 5, fallback_resolution = 300)
+dev.off()
+```
+
+## Annotated DM CpGs
+```{r barplots annotation to feature}
+#Find unique gene annotation for cpgs
+all.genes = annoEPICsub[c("cgid", "UCSC_RefGene_Name")] # subset annotated beta matrix 
+s = strsplit(all.genes$UCSC_RefGene_Name, split = ";")
+
+uniqueGenes = data.frame(cgid = rep(all.genes$cgid, sapply(s, length)), external_gene_name = unlist(s))
+uniqueGenes = uniqueGenes[!duplicated(uniqueGenes[c(names(uniqueGenes))]),] 
+
+#Unique relation to genes
+all.refGeneGroup = annoEPIC[c("cgid", "UCSC_RefGene_Group")] # subset annotated beta matrix 
+s = strsplit(all.refGeneGroup$UCSC_RefGene_Group, split = ";")
+
+uniqueRelToGenes = data.frame(cgid = rep(all.refGeneGroup$cgid, sapply(s, length)), Relation_to_gene = unlist(s))
+uniqueRelToGenes = uniqueRelToGenes[!duplicated(uniqueRelToGenes[c(names(uniqueRelToGenes))]),] 
+
+
+###-------Day 7 vs day 0-----------
+b_7_ann = subset(r_b_7, select = c("cgid","Phantom5_Enhancers", "Relation_to_Island"))
+b_7_ann = merge(b_7_ann, uniqueRelToGenes, by = "cgid", all.x = TRUE)
+
+## define a helper function
+empty_as_na <- function(x){
+    if("factor" %in% class(x)) x <- as.character(x) ## since ifelse wont work with factors
+    ifelse(as.character(x)!="", x, NA)
+}
+
+## transform all columns
+b_7_ann = b_7_ann %>% mutate_each(funs(empty_as_na), matches("Phantom5_Enhancers")) 
+Enhancers = as.data.frame(table(!is.na(b_7_ann$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+
+RelationToGene = as.data.frame(table(b_7_ann$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+
+RelationToIsland = as.data.frame(table(b_7_ann$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+
+Ann_b_7 = rbind(Enhancers, RelationToGene, RelationToIsland)
+Ann_b_7$Variable = factor(Ann_b_7$Variable, levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea", "TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR", "Enhancer"))
+Ann_b_7$Type = factor(Ann_b_7$Type, levels = c("Relation to CGI","Relation to gene", "Regulatory element" ))
+
+ggplot(Ann_b_7, aes(x = Variable, y = Count, fill = Type))+
+  geom_bar(stat = "identity") +
+  labs(x = "", title = "Day 0 vs day 7")+
+  scale_fill_brewer(palette= "Accent")+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) 
+dev.copy(pdf,paste0("DMCpGs-Annot_day0vsday7.pdf"),height = 5, paper='special')
+dev.off()
+
+###----------Day 13 vs day 0------------------
+b_13_ann = subset(r_b_13, select = c("cgid","Phantom5_Enhancers", "Relation_to_Island"))
+b_13_ann = merge(b_13_ann, uniqueRelToGenes, by = "cgid", all.x = TRUE)
+
+## transform all columns
+b_13_ann = b_13_ann %>% mutate_each(funs(empty_as_na), matches("Phantom5_Enhancers")) 
+Enhancers = as.data.frame(table(!is.na(b_13_ann$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+
+RelationToGene = as.data.frame(table(b_13_ann$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+
+RelationToIsland = as.data.frame(table(b_13_ann$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+
+Ann_b_13 = rbind(Enhancers, RelationToGene, RelationToIsland)
+Ann_b_13$Variable = factor(Ann_b_13$Variable, levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea", "TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR", "Enhancer"))
+Ann_b_13$Type = factor(Ann_b_13$Type, levels = c("Relation to CGI","Relation to gene", "Regulatory element" ))
+
+ggplot(Ann_b_13, aes(x = Variable, y = Count, fill = Type))+
+  geom_bar(stat = "identity") +
+  labs(x = "", title = "Day 0 vs day 13")+
+  scale_fill_brewer(palette= "Accent")+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) 
+dev.copy(pdf,paste0("DMCpGs-Annot_day0vsday13.pdf"),height = 5, paper='special')
+dev.off()
+
+###--------Day 20 vs day 0-----------------
+b_20_ann = subset(r_b_20, select = c("cgid","Phantom5_Enhancers", "Relation_to_Island"))
+b_20_ann = merge(b_20_ann, uniqueRelToGenes, by = "cgid", all.x = TRUE)
+
+## transform all columns
+b_20_ann = b_20_ann %>% mutate_each(funs(empty_as_na), matches("Phantom5_Enhancers")) 
+Enhancers = as.data.frame(table(!is.na(b_20_ann$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+
+RelationToGene = as.data.frame(table(b_20_ann$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+
+RelationToIsland = as.data.frame(table(b_20_ann$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+
+Ann_b_20 = rbind(Enhancers, RelationToGene, RelationToIsland)
+Ann_b_20$Variable = factor(Ann_b_20$Variable, levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea", "TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR", "Enhancer"))
+Ann_b_20$Type = factor(Ann_b_20$Type, levels = c("Relation to CGI","Relation to gene", "Regulatory element" ))
+
+ggplot(Ann_b_20, aes(x = Variable, y = Count, fill = Type))+
+  geom_bar(stat = "identity") +
+  labs(x = "", title = "Day 0 vs day 20")+
+  scale_fill_brewer(palette= "Accent")+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) 
+dev.copy(pdf,paste0("DMCpGs-Annot_day0vsday20.pdf"),height = 5, paper='special')
+dev.off()
+
+###------Day 13 vs day 7---------------
+ann7_13 = subset(r_7_13, select = c("cgid","Phantom5_Enhancers", "Relation_to_Island"))
+ann7_13 = merge(ann7_13, uniqueRelToGenes, by = "cgid", all.x = TRUE)
+
+## transform all columns
+ann7_13 = ann7_13 %>% mutate_each(funs(empty_as_na), matches("Phantom5_Enhancers")) 
+Enhancers = as.data.frame(table(!is.na(ann7_13$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+
+RelationToGene = as.data.frame(table(ann7_13$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+
+RelationToIsland = as.data.frame(table(ann7_13$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+
+Ann_7_13 = rbind(Enhancers, RelationToGene, RelationToIsland)
+Ann_7_13$Variable = factor(Ann_7_13$Variable, levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea", "TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR", "Enhancer"))
+Ann_7_13$Type = factor(Ann_7_13$Type, levels = c("Relation to CGI","Relation to gene", "Regulatory element" ))
+
+
+ggplot(Ann_7_13, aes(x = Variable, y = Count, fill = Type))+
+  geom_bar(stat = "identity") +
+  labs(x = "", title = "Day 7 vs day 13")+
+  scale_fill_brewer(palette= "Accent")+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) 
+dev.copy(pdf,paste0("DMCpGs-Annot_day7vsday13.pdf"),height = 5, paper='special')
+dev.off()
+
+
+###----------Day 20 vs day 7---------------
+ann7_20 = subset(r_7_20, select = c("cgid","Phantom5_Enhancers", "Relation_to_Island"))
+ann7_20 = merge(ann7_20, uniqueRelToGenes, by = "cgid", all.x = TRUE)
+
+## transform all columns
+ann7_20 = ann7_20 %>% mutate_each(funs(empty_as_na), matches("Phantom5_Enhancers")) 
+Enhancers = as.data.frame(table(!is.na(ann7_20$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+
+RelationToGene = as.data.frame(table(ann7_20$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+
+RelationToIsland = as.data.frame(table(ann7_20$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+
+Ann_7_20 = rbind(Enhancers, RelationToGene, RelationToIsland)
+Ann_7_20$Variable = factor(Ann_7_20$Variable, levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea", "TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR", "Enhancer"))
+Ann_7_20$Type = factor(Ann_7_20$Type, levels = c("Relation to CGI","Relation to gene", "Regulatory element" ))
+
+ggplot(Ann_7_20, aes(x = Variable, y = Count, fill = Type))+
+  geom_bar(stat = "identity") +
+  labs(x = "", title = "Day 7 vs day 20")+
+  scale_fill_brewer(palette= "Accent")+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) 
+dev.copy(pdf,paste0("DMCpGs-Annot_day7vsday20.pdf"),height = 5, paper='special')
+dev.off()
+
+###-------Day 20 vs day 13............
+ann13_20 = subset(r_13_20, select = c("cgid","Phantom5_Enhancers", "Relation_to_Island"))
+ann13_20 = merge(ann13_20, uniqueRelToGenes, by = "cgid", all.x = TRUE)
+
+## transform all columns
+ann13_20 = ann13_20 %>% mutate_each(funs(empty_as_na), matches("Phantom5_Enhancers")) 
+Enhancers = as.data.frame(table(!is.na(ann13_20$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+
+RelationToGene = as.data.frame(table(ann13_20$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+
+RelationToIsland = as.data.frame(table(ann13_20$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+
+Ann_13_20 = rbind(Enhancers, RelationToGene, RelationToIsland)
+Ann_13_20$Variable = factor(Ann_13_20$Variable, levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea", "TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR", "Enhancer"))
+Ann_13_20$Type = factor(Ann_13_20$Type, levels = c("Relation to CGI","Relation to gene", "Regulatory element" ))
+
+pdf("DMCpGs-Annot_day13vsday20.pdf", height = 5)
+ggplot(Ann_13_20, aes(x = Variable, y = Count, fill = Type))+
+  geom_bar(stat = "identity") +
+  labs(x = "", title = "Day 13 vs day 20")+
+  scale_fill_brewer(palette= "Accent")+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) 
+dev.copy(pdf,paste0("DMCpGs-Annot_day13vsday20.pdf"),height = 5, paper='special')
+dev.off()
+```
+
+```{r stacked bar plots comparisons}
+##----Relation to island------
+RelationToIsland = as.data.frame(table(b_7_ann$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+RelationToIsland$Group = "Day 0 vs day 7"
+RelationToIslandA = RelationToIsland
+RelationToIslandA = RelationToIslandA %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToIsland = as.data.frame(table(b_13_ann$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+RelationToIsland$Group = "Day 0 vs day 13"
+RelationToIslandB = RelationToIsland
+RelationToIslandB = RelationToIslandB %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToIsland = as.data.frame(table(b_20_ann$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+RelationToIsland$Group = "Day 0 vs day 20"
+RelationToIslandC = RelationToIsland
+RelationToIslandC = RelationToIslandC %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToIsland = as.data.frame(table(ann7_13$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+RelationToIsland$Group = "Day 7 vs day 13"
+RelationToIslandD = RelationToIsland
+RelationToIslandD = RelationToIslandD %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToIsland = as.data.frame(table(ann7_20$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+RelationToIsland$Group = "Day 7 vs day 20"
+RelationToIslandE = RelationToIsland
+RelationToIslandE = RelationToIslandE %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToIsland = as.data.frame(table(ann13_20$Relation_to_Island))
+colnames(RelationToIsland) = c("Variable","Count")
+RelationToIsland$Type = "Relation to CGI"
+RelationToIsland$Variable = factor(RelationToIsland$Variable , levels = c("Island", "N_Shelf", "N_Shore", "S_Shelf", "S_Shore", "OpenSea"))
+RelationToIsland$Group = "Day 13 vs day 20"
+RelationToIslandF = RelationToIsland
+RelationToIslandF = RelationToIslandF %>% mutate(percent = Count/sum(Count)*100)
+
+RelToIs = rbind(RelationToIslandA, RelationToIslandB, RelationToIslandC, RelationToIslandD, RelationToIslandE, RelationToIslandF)
+RelToIs$Variable = factor(RelToIs$Variable, levels = c("N_Shelf", "N_Shore","Island", "S_Shelf", "S_Shore", "OpenSea"))
+RelToIs$Group = factor(RelToIs$Group, levels = c("Day 0 vs day 7", "Day 0 vs day 13", "Day 0 vs day 20", "Day 7 vs day 13", "Day 7 vs day 20", "Day 13 vs day 20"))
+
+
+ggplot(RelToIs, aes(x = Group, y = Count, fill = Variable))+
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette= "Accent")+
+  labs(x = "", title = "Differentially methylated CpGs in relation to Island")+
+  theme_few()+ 
+  theme(axis.text.x = element_text(angle = 90))
+dev.copy(pdf,paste0("SigCpGs.RelToIsland.allComparisons.pdf"),width = 8, paper='special')
+dev.off()
+
+ggplot(RelToIs, aes(x = Group, y = percent, fill = Variable))+
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette= "Accent")+
+  labs(x = "", title = "Differentially methylated CpGs in relation to Island", y = "%")+
+  theme_few()+ 
+  theme(axis.text.x = element_text(angle = 90))
+dev.copy(pdf,paste0("SigCpGs.RelToIsland.allComparisons.Percent.pdf"),width = 8, paper='special')
+dev.off()
+
+
+###----Relation to gene-----
+RelationToGene = as.data.frame(table(b_7_ann$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+RelationToGene$Group = "Day 0 vs day 7"
+RelationToGeneA = RelationToGene
+RelationToGeneA = RelationToGeneA %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToGene = as.data.frame(table(b_13_ann$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+RelationToGene$Group = "Day 0 vs day 13"
+RelationToGeneB = RelationToGene
+RelationToGeneB = RelationToGeneB %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToGene = as.data.frame(table(b_20_ann$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+RelationToGene$Group = "Day 0 vs day 20"
+RelationToGeneC = RelationToGene
+RelationToGeneC = RelationToGeneC %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToGene = as.data.frame(table(ann7_13$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+RelationToGene$Group = "Day 7 vs day 13"
+RelationToGeneD = RelationToGene
+RelationToGeneD = RelationToGeneD %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToGene = as.data.frame(table(ann7_20$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+RelationToGene$Group = "Day 7 vs day 20"
+RelationToGeneE = RelationToGene
+RelationToGeneE = RelationToGeneE %>% mutate(percent = Count/sum(Count)*100)
+
+RelationToGene = as.data.frame(table(ann13_20$Relation_to_gene))
+colnames(RelationToGene) = c("Variable","Count")
+RelationToGene$Type = "Relation to gene"
+RelationToGene$Variable = factor(RelationToGene$Variable , levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR" ))
+RelationToGene$Group = "Day 13 vs day 20"
+RelationToGeneF = RelationToGene
+RelationToGeneF = RelationToGeneF %>% mutate(percent = Count/sum(Count)*100)
+
+RelToGene = rbind(RelationToGeneA, RelationToGeneB, RelationToGeneC, RelationToGeneD, RelationToGeneE, RelationToGeneF)
+RelToGene$Variable = factor(RelToGene$Variable, levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR"))
+RelToGene$Group = factor(RelToGene$Group, levels = c("Day 0 vs day 7", "Day 0 vs day 13", "Day 0 vs day 20", "Day 7 vs day 13", "Day 7 vs day 20", "Day 13 vs day 20"))
+
+ggplot(RelToGene, aes(x = Group, y = Count, fill = Variable))+
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette= "Accent")+
+  labs(x = "", title = "Differentially methylated CpGs in relation to Gene")+
+  theme_few()+ 
+  theme(axis.text.x = element_text(angle = 90))
+dev.copy(pdf,paste0("SigCpGs.RelToGene.allComparisons.pdf"),width = 8, paper='special')
+dev.off()
+
+ggplot(RelToGene, aes(x = Group, y = percent, fill = Variable))+
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette= "Accent")+
+  labs(x = "", title = "Differentially methylated CpGs in relation to Gene", y = "%")+
+  theme_few()+ 
+  theme(axis.text.x = element_text(angle = 90))
+dev.copy(pdf,paste0("SigCpGs.RelToGene.allComparisons.percent.pdf"),width = 8, paper='special')
+dev.off()
+
+### Enhancers
+Enhancers = as.data.frame(table(!is.na(b_7_ann$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+Enhancers$Group = "Day 0 vs day 7"
+EnhancersA = Enhancers
+
+Enhancers = as.data.frame(table(!is.na(b_13_ann$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+Enhancers$Group = "Day 0 vs day 13"
+EnhancersB = Enhancers
+
+Enhancers = as.data.frame(table(!is.na(b_20_ann$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+Enhancers$Group = "Day 0 vs day 20"
+EnhancersC = Enhancers
+
+Enhancers = as.data.frame(table(!is.na(ann7_13$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+Enhancers$Group = "Day 7 vs day 13"
+EnhancersD = Enhancers
+
+Enhancers = as.data.frame(table(!is.na(ann7_20$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+Enhancers$Group = "Day 7 vs day 20"
+EnhancersE = Enhancers
+
+Enhancers = as.data.frame(table(!is.na(ann13_20$Phantom5_Enhancers)))
+colnames(Enhancers) = c("Variable","Count")
+Enhancers  =Enhancers[2,]
+Enhancers$Type = "Regulatory element"
+Enhancers$Variable = "Enhancer"
+Enhancers$Group = "Day 13 vs day 20"
+EnhancersF = Enhancers
+
+RelEnhancers = rbind(EnhancersA, EnhancersB, EnhancersC, EnhancersD, EnhancersE, EnhancersF)
+RelEnhancers$Group = factor(RelEnhancers$Group, levels = c("Day 0 vs day 7", "Day 0 vs day 13", "Day 0 vs day 20", "Day 7 vs day 13", "Day 7 vs day 20", "Day 13 vs day 20"))
+
+ggplot(RelEnhancers, aes(x = Group, y = Count, fill = Variable))+
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette= "Accent")+
+  labs(x = "", title = "Differentially methylated CpGs in relation to regulatory elements")+
+  theme_few()+ 
+  theme(axis.text.x = element_text(angle = 90))
+dev.copy(pdf,paste0("SigCpGs.Enhancers.allComparisons.pdf"),width = 8, paper='special')
+dev.off()
+
+ggplot(RelEnhancers[1:3,], aes(x = Group, y = Count, fill = Variable))+
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette= "Accent")+
+  labs(x = "", title = "Differentially methylated CpGs in relation to regulatory elements")+
+  theme_few()+ 
+  theme(axis.text.x = element_text(angle = 90))+
+  geom_hline(yintercept = c(5474, 6434, 8066, 10098))
+dev.copy(pdf,paste0("SigCpGs.Enhancers.Overlap.pdf"),width = 8, paper='special')
+dev.off()
+```
+ 
+
+```{r visualize global methylation}
+#RELATION TO ISLAND
+betas_ctr_df$cgid = rownames(betas_ctr_df)
+betas_ctr_df_ann = merge(betas_ctr_df, annoEPICsub, by = "cgid")
+betas_ctr_df_ann = merge(betas_ctr_df_ann,uniqueRelToGenes, by = "cgid" )
+betas_ctr_df_ann = subset(betas_ctr_df_ann, select = c("cgid", "1-sc1-D0-ctrl-A", "2-sc1-D0-ctrl-B", "3-sc2-D0-ctrl-A", "18-sc1-D0-ctrl-C", "4-sc1-D7-ctrl-A", "5-sc2-D7-ctrl-A", "20-sc1-D7-ctrl-B", "248-D7-CTRL","10-sc1-D13-ctrl-A", "11-sc2-D13-ctrl-A", "25-sc1-D13-ctrl-B", "26-sc2-D13-ctrl-B", "12-sc1-D20-ctrl-A", "13-sc2-D20-ctrl-A","28-sc1-D20-ctrl-B", "29-sc2-D20-ctrl-B", "186-D20-Ctr-A", "187-D20-Ctr-B", "1-d0-1", "2-d0-2", "5-d7-ctr-1", "6-d7-ctr-2", "Relation_to_Island", "Phantom5_Enhancers", "Relation_to_gene"))
+
+Island = betas_ctr_df_ann %>% dplyr::filter(Relation_to_Island == "Island") %>% summarize_if(is.numeric, mean)
+Island$Relation_to_CGI = "Island"
+N_Shelf = betas_ctr_df_ann %>% dplyr::filter(Relation_to_Island == "N_Shelf") %>% summarize_if(is.numeric, mean)
+N_Shelf$Relation_to_CGI = "N_Shelf"
+N_Shore = betas_ctr_df_ann %>% dplyr::filter(Relation_to_Island == "N_Shore") %>% summarize_if(is.numeric, mean)
+N_Shore$Relation_to_CGI = "N_Shore"
+S_Shelf = betas_ctr_df_ann %>% dplyr::filter(Relation_to_Island == "S_Shelf") %>% summarize_if(is.numeric, mean)
+S_Shelf$Relation_to_CGI = "S_Shelf"
+S_Shore = betas_ctr_df_ann %>% dplyr::filter(Relation_to_Island == "S_Shore") %>% summarize_if(is.numeric, mean)
+S_Shore$Relation_to_CGI = "S_Shore"
+OpenSea = betas_ctr_df_ann %>% dplyr::filter(Relation_to_Island == "OpenSea") %>% summarize_if(is.numeric, mean)
+OpenSea$Relation_to_CGI = "OpenSea"
+
+RelToIsland = dplyr::bind_rows(Island, N_Shelf, N_Shore, S_Shelf, S_Shore, OpenSea)
+RelToIsland = RelToIsland %>% pivot_longer(-c(Relation_to_CGI), names_to = "Sample_Name", values_to = "Average_beta")
+RelToIsland = merge(RelToIsland, targets, by = "Sample_Name")
+RelToIsland$Type = RelToIsland$Relation_to_CGI
+RelToIsland$Category = "Relation_to_CGI"
+
+## ENHANCERS
+betas_ctr_df_ann = betas_ctr_df_ann %>% mutate_each(funs(empty_as_na), matches("Phantom5_Enhancers")) 
+Phantom5Enhancer = betas_ctr_df_ann %>% dplyr::filter(!is.na(Phantom5_Enhancers)) %>% summarize_if(is.numeric, mean)
+Phantom5Enhancer$Regulatory_element = "Enhancer"
+
+Phantom5Enhancer = Phantom5Enhancer %>% pivot_longer(-c(Regulatory_element), names_to = "Sample_Name", values_to = "Average_beta")
+Phantom5Enhancer = merge(Phantom5Enhancer, targets, by = "Sample_Name")
+Phantom5Enhancer$Type = "Enhancer"
+Phantom5Enhancer$Category = "Regulatory_Element"
+
+#RELATION TO GENES
+TSS1500 = betas_ctr_df_ann %>% dplyr::filter(Relation_to_gene == "TSS1500") %>% summarize_if(is.numeric, mean)
+TSS1500$Relation_to_gene = "TSS1500"
+TSS200 = betas_ctr_df_ann %>% dplyr::filter(Relation_to_gene == "TSS200") %>% summarize_if(is.numeric, mean)
+TSS200$Relation_to_gene = "TSS200"
+UTR5 = betas_ctr_df_ann %>% dplyr::filter(Relation_to_gene == "5'UTR") %>% summarize_if(is.numeric, mean)
+UTR5$Relation_to_gene = "5'UTR"
+Exon1 = betas_ctr_df_ann %>% dplyr::filter(Relation_to_gene == "1stExon") %>% summarize_if(is.numeric, mean)
+Exon1$Relation_to_gene = "1stExon"
+Body = betas_ctr_df_ann %>% dplyr::filter(Relation_to_gene == "Body") %>% summarize_if(is.numeric, mean)
+Body$Relation_to_gene = "Body"
+ExonBnd = betas_ctr_df_ann %>% dplyr::filter(Relation_to_gene == "ExonBnd") %>% summarize_if(is.numeric, mean)
+ExonBnd$Relation_to_gene = "ExonBnd"
+UTR3 = betas_ctr_df_ann %>% dplyr::filter(Relation_to_gene == "3'UTR") %>% summarize_if(is.numeric, mean)
+UTR3$Relation_to_gene = "3'UTR"
+
+RelToGene = dplyr::bind_rows(TSS1500,TSS200, UTR5, Exon1, Body, ExonBnd, UTR3)
+RelToGene = RelToGene %>% pivot_longer(-c(Relation_to_gene), names_to = "Sample_Name", values_to = "Average_beta")
+RelToGene = merge(RelToGene, targets, by = "Sample_Name")
+RelToGene$Type = RelToGene$Relation_to_gene
+RelToGene$Category = "Relation_to_gene"
+RelToGene$Relation_to_gene = factor(RelToGene$Relation_to_gene, levels = c("TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR"))
+
+
+##All categories in same plot ----
+
+allreg = dplyr::bind_rows(RelToIsland, Phantom5Enhancer, RelToGene)
+allreg$Type = factor(allreg$Type, levels = c("N_Shelf", "N_Shore", "Island", "S_Shore", "S_Shelf", "OpenSea", "TSS1500", "TSS200","5'UTR", "1stExon", "Body", "ExonBnd", "3'UTR", "Enhancer"))
+
+ggplot(allreg, aes(x = Type, y = Average_beta))+
+  geom_boxplot(aes(fill = as.factor(timepoint)))+
+  geom_point(aes(fill = as.factor(timepoint)), pch = 21, position = position_jitterdodge(dodge.width = 0.75), col = "black", size = 1, alpha = 0.5)+
+  ylim(0,1) +
+  scale_fill_manual(values=daycols) +
+  labs(x = "", title = "Global methylation", fill = "Day", y = "Mean beta")+
+  theme_few() #+
+  #facet_wrap(~ Category, scales = "free_y")
+dev.copy(pdf,paste0("Global_methylation_all.pdf"),width = 10,height = 7, paper='special')
+dev.off()
+
+
+ggplot(allreg, aes(x = timepoint, y = Average_beta))+
+  geom_boxplot(aes(fill = as.factor(timepoint)))+
+  geom_point(aes(fill = as.factor(timepoint)), pch = 21, position = position_jitterdodge(dodge.width = 0.75), col = "black", size = 1, alpha = 0.5)+
+  scale_fill_manual(values=daycols) +
+  labs(x = "", title = "Global methylation", fill = "Day", y = "Mean beta")+
+  theme_few() +
+  facet_wrap(~ Category+Type) +
+  scale_y_continuous(limits=c(0, 1))
+dev.copy(pdf,paste0("Global_methylation_all_facet.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+ggplot(allreg, aes(x = timepoint, y = Average_beta))+
+  geom_boxplot(aes(fill = as.factor(timepoint)))+
+  geom_point(aes(fill = as.factor(timepoint)), pch = 21, position = position_jitterdodge(dodge.width = 0.75), col = "black", size = 1, alpha = 0.5)+
+  scale_fill_manual(values=daycols) +
+  labs(x = "", title = "Global methylation", fill = "Day", y = "Mean beta")+
+  theme_few() +
+  facet_wrap(~ Category+Type, scales = "free_y") 
+dev.copy(pdf,paste0("Global_methylation_all_facet_y.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+
+
+##ALL CPGs independent of category: Mean of all CPGs per sample --------------------
+betas_ctr_df = betas_ctr_df[,1:22]
+myFunc <- function(x) c(mean=mean(x), sd=sd(x))
+allmean = as.data.frame(sapply(betas_ctr_df, myFunc))
+allmean = as.data.frame(t(allmean))
+allmean$Sample_Name = rownames(allmean)
+allmean = merge(allmean, targets, by = "Sample_Name")
+
+compare_means(mean ~ timepoint, allmean, method = "t.test", paired = FALSE, group.by = NULL, ref.group = NULL)
+my_comparisons <- list( c("0", "7"), c("0", "13"), c("0", "20"), c("7", "13"), c("7", "20"),  c("13", "20"))
+
+
+ggplot(allmean, aes(x = timepoint, y = mean))+
+ geom_boxplot(aes(fill = as.factor(timepoint)))+
+  geom_point(aes(fill = as.factor(timepoint)), pch = 21, position = position_jitterdodge(dodge.width = 0.75), col = "black", size = 2, alpha = 0.5)+
+  scale_fill_manual(values=daycols) +
+  labs(x = "", title = "Genome-wide methylation", fill = "Day", y = "Mean beta value/sample", subtitle = "All CpGs")+
+  #stat_compare_means(label.y = 0.67, method = "anova")+
+  stat_compare_means(label.y = c(0.65, 0.653, 0.656, 0.659, 0.662, 0.665),comparisons = my_comparisons, method = "t.test", label = "p.signif",  ref.group = "0", tip.length = 0.02)+
+  scale_y_continuous(limits=c(0.60, 0.75)) +
+  theme_few()
+dev.copy(pdf,paste0("Global_methylation_allCPGsFreeScales.pdf"),width = 8,height = 7, paper='special')
+dev.off()
+
+
+##Global methylation Significant CpGs---------------
+sig = c(rownames(r_b_7), rownames(r_b_13), rownames(r_b_20))
+sig = unique(sig)
+
+betas_ctr_df_sig = betas_ctr_df[sig,]
+
+avg_sample_betaSig = as.data.frame(colMeans(betas_ctr_df_sig, na.rm = TRUE))
+colnames(avg_sample_betaSig) = "Mean.beta"
+avg_sample_betaSig$Sample_Name = rownames(avg_sample_betaSig)
+avg_sample_betaSig = merge(avg_sample_betaSig, targets_ctr_small, by = "Sample_Name")
+
+compare_means(mean ~ timepoint, allmean, method = "t.test", paired = FALSE, group.by = NULL, ref.group = NULL)
+my_comparisons <- list( c("0", "7"), c("0", "13"), c("0", "20"), c("7", "13"), c("7", "20"),  c("13", "20"))
+
+ggplot(avg_sample_betaSig, aes(x = as.factor(timepoint), y = Mean.beta, fill = timepoint)) +
+  geom_boxplot(aes(fill = as.factor(timepoint))) +
+  geom_point(aes(fill = timepoint), pch = 21, position = position_jitterdodge(dodge.width = 0.75), col = "black", size = 2, alpha = 0.5)+
+  scale_fill_manual(values = daycols)+
+  labs(title = "Genome-wide methylation", subtitle = "Significant CpGs", 
+       x = "", y = "Mean beta value/sample", fill ="Day") +
+  scale_y_continuous(limits=c(0.60, 0.75)) +
+  #stat_compare_means(label.y = 0.750, method = "anova")+
+  stat_compare_means(label.y = c(0.728, 0.732, 0.736, 0.740, 0.744, 0.748),comparisons = my_comparisons, method = "t.test", label = "p.signif",  ref.group = "0", tip.length = 0.02)+
+  theme_few()
+dev.copy(pdf,paste0("Global_methylation_Sig_CpGsFreeScales.pdf"),width = 8,height = 7, paper='special')
+dev.off()
+```
+
+
+## Density scatter plots
+
+```{r Density plots of mean betas }
+#Day 0 vs day 7
+sigsites = rownames(r_b_7) #Significant sites 
+isDMP7= rownames(avg.betas) %in% sigsites #Boolean vector with significant sites
+
+#identical(rownames(d7_avg_beta), rownames(d0_avg_beta)) #Sjekk at det er samme rekkefølge
+d0_d7avg.betas = cbind(d0_avg_beta, d7_avg_beta) #Bind sammen D0 og d7
+
+create.densityScatter(d0_d7avg.betas, is.special=isDMP7, sparse.points=0.001, add.text.cor=TRUE) + 
+  labs(x="mean beta: Day 0", y="mean beta: Day 7") +
+  coord_fixed()
+
+
+#Day 0 vs day 13
+sigsites = rownames(r_b_13) #Significant sites 
+isDMP13 = rownames(avg.betas) %in% sigsites #Boolean vector with significant sites
+
+#identical(rownames(d7_avg_beta), rownames(d13_avg_beta)) #Sjekk at det er riktig rekkefølge
+d0_d13avg.betas = cbind(d0_avg_beta, d13_avg_beta)
+
+create.densityScatter(d0_d13avg.betas, is.special=isDMP13, sparse.points=0.001, add.text.cor=TRUE) + 
+  labs(x="mean beta: Day 0", y="mean beta: Day 13") +
+  coord_fixed()
+
+#Day 0 vs day 20
+sigsites = rownames(r_b_20) #Significant sites 
+isDMP20 = rownames(avg.betas) %in% sigsites #Boolean vector with significant sites
+
+#identical(rownames(d0_avg_beta), rownames(d20_avg_beta)) #Sjekk at det er riktig rekkefølge
+d0_d20avg.betas = cbind(d0_avg_beta, d20_avg_beta)
+
+create.densityScatter(d0_d20avg.betas, is.special=isDMP20, sparse.points=0.001, add.text.cor=TRUE) + 
+  labs(x="mean beta: Day 0", y="mean beta: Day 20") +
+  coord_fixed()
+
+#Day 7 vs day 13
+sigsites = rownames(r_7_13) #Significant sites 
+isDMP713 = rownames(avg.betas) %in% sigsites #Boolean vector with significant sites
+
+#identical(rownames(d7_avg_beta), rownames(d13_avg_beta)) #Sjekk at det er riktig rekkefølge
+d7_d13avg.betas = cbind(d7_avg_beta, d13_avg_beta)
+
+create.densityScatter(d7_d13avg.betas, is.special=isDMP713, sparse.points=0.001, add.text.cor=TRUE) + 
+  labs(x="mean beta: Day 7", y="mean beta: Day 13") +
+  coord_fixed()
+
+#Day 7 vs day 20
+sigsites = rownames(r_7_20) #Significant sites 
+isDMP720 = rownames(avg.betas) %in% sigsites #Boolean vector with significant sites
+
+#identical(rownames(d7_avg_beta), rownames(d20_avg_beta)) #Sjekk at det er riktig rekkefølge
+d7_d20avg.betas = cbind(d7_avg_beta, d20_avg_beta)
+
+create.densityScatter(d7_d20avg.betas, is.special=isDMP720, sparse.points=0.001, add.text.cor=TRUE) + 
+  labs(x="mean beta: Day 7", y="mean beta: Day 20") +
+  coord_fixed()
+
+#Day 13 vs day 20
+sigsites = rownames(r_13_20) #Significant sites 
+isDMP1320 = rownames(avg.betas) %in% sigsites #Boolean vector with significant sites
+
+#identical(rownames(d13_avg_beta), rownames(d20_avg_beta)) #Sjekk at det er riktig rekkefølge
+d13_d20avg.betas = cbind(d13_avg_beta, d20_avg_beta)
+
+create.densityScatter(d13_d20avg.betas, is.special=isDMP1320, sparse.points=0.001, add.text.cor=TRUE) + 
+  labs(x="mean beta: Day 13", y="mean beta: Day 20") +
+  coord_fixed()
+```
+
+## Mean difference in beta values - Vulcano/manhatten plots
+```{r Mean difference in BETAS D0-D7}
+##Day 0 vs day 7 
+#identical(rownames(d7_avg_beta), rownames(d0_avg_beta)) #True
+d7_d0mean_beta = d7_avg_beta - d0_avg_beta #Mean difference baseline to day 7 
+colnames(d7_d0mean_beta) = "mean.diff"
+
+#identical(rownames(t_b_7), rownames(d7_d0mean_beta)) #False
+d7_d0mean_beta = d7_d0mean_beta[order(match(rownames(d7_d0mean_beta), t_b_7$Name)), , drop = FALSE] #Change order of mean.diff so identical with t_b_7
+#identical(rownames(t_b_7), rownames(d7_d0mean_beta)) #TRUE
+
+b_7_mean = cbind(t_b_7, d7_d0mean_beta) #Merge with annotated DM result
+DMP07 = rownames(b_7_mean) %in% rownames(r_b_7) #Significant CpGs
+
+##PLOT mean.diff in betas vs p-val
+top10_07 = rownames(r_b_7)[1:10] #Top 10 CpGs
+
+keyvals.colour <- ifelse(
+    b_7_mean$adj.P.Val >= 0.01 |  b_7_mean$adj.P.Val == "NA", 'grey30',
+      ifelse(b_7_mean$adj.P.Val < 0.01, 'red2',
+        'grey30'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'grey30'
+  names(keyvals.colour)[keyvals.colour == 'red2'] <- 'Significant (p < 0.01)'
+  names(keyvals.colour)[keyvals.colour == 'black'] <- '?'
+  names(keyvals.colour)[keyvals.colour == 'grey30'] <- 'Not significant'
+
+EnhancedVolcano(b_7_mean,
+    lab = b_7_mean$cgid,
+    selectLab = "",
+    labSize = 2,
+    x = 'mean.diff',
+    y = 'P.Value',
+    pointSize = 0.1,
+    xlim = c(-1,1),
+    xlab = "Mean difference in beta values",
+    FCcutoff = 0.5,
+    cutoffLineType = "blank",
+    colCustom = keyvals.colour,
+    title = "Day 0 vs day 7",
+    subtitle = "161660 significant CpGs",
+    caption = "")
+dev.copy(pdf,paste0("MeanDiff_CtrlDay0vsDay7.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+#Plot modified Manhattan plot
+b_7_mean$chr = factor(b_7_mean$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+notsig = subset(b_7_mean, adj.P.Val > 0.01)
+notsig$chr = factor(notsig$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+
+increase=subset(b_7_mean, mean.diff > 0 & adj.P.Val < 0.01)
+increase$chr = factor(increase$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+decrease=subset(b_7_mean, mean.diff < 0 & adj.P.Val < 0.01)
+decrease$chr = factor(decrease$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+
+require(ggplot2)
+#BW
+ggplot(b_7_mean, aes(factor(pos), mean.diff))+
+  geom_point(size=1, alpha=0.2) +
+  facet_grid(~ chr, scales="free", space="free")+
+  geom_hline(yintercept = 0)+
+  xlab("") + 
+  labs(title = "Day 7 control vs day 0 control") +
+  ylab("Mean difference in beta values") +
+  ylim(-1,1)+theme(axis.ticks = element_blank(),axis.text.x = element_blank())
+
+  
+#Significant CpGs colored (overplotted)
+ggplot(notsig, aes(factor(pos), mean.diff))+
+  geom_point(col = "black", size=0.5, alpha=1) +
+    geom_point(data=increase, aes(factor(pos), mean.diff), color="green", size=0.5, alpha=0.3) +
+    geom_point(data=decrease, aes(factor(pos), mean.diff), color="red", size=0.5, alpha=0.3) +
+    facet_grid(~ chr, scales="free", space="free")+
+    labs(title = "Day 7 control vs day 0 control") +
+    xlab("") + 
+    ylab("Mean difference in beta values") +
+    ylim(-1,1)+theme(axis.ticks = element_blank(),axis.text.x = element_blank())
+```
+
+
+```{r Mean difference in BETAS D0-D13}
+##Day 0 vs day 13
+#identical(rownames(d13_avg_beta), rownames(d0_avg_beta)) #TRUE
+d13_d0mean_beta = d13_avg_beta - d0_avg_beta #Mean difference baseline to day 13 
+colnames(d13_d0mean_beta) = "mean.diff" 
+
+#identical(rownames(t_b_13), rownames(d13_d0mean_beta)) #False
+d13_d0mean_beta = d13_d0mean_beta[order(match(rownames(d13_d0mean_beta), t_b_13$Name)), , drop = FALSE] #Change order of mean.diff so identical with t_b_13
+#identical(rownames(t_b_13), rownames(d13_d0mean_beta)) #TRUE
+
+b_13_mean = cbind(t_b_13, d13_d0mean_beta) #Merge with annotated DM result
+DMP013 = rownames(b_13_mean) %in% rownames(r_b_13)
+
+top10_013 = rownames(r_b_13)[1:10]
+
+keyvals.colour <- ifelse(
+    b_13_mean$adj.P.Val >= 0.01 |  b_13_mean$adj.P.Val == "NA", 'grey30',
+      ifelse(b_13_mean$adj.P.Val < 0.01, 'red2',
+        'grey30'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'grey30'
+  names(keyvals.colour)[keyvals.colour == 'red2'] <- 'Significant (p < 0.01)'
+  names(keyvals.colour)[keyvals.colour == 'black'] <- '?'
+  names(keyvals.colour)[keyvals.colour == 'grey30'] <- 'Not significant'
+
+EnhancedVolcano(b_13_mean,
+    lab = b_13_mean$cgid,
+    selectLab = "",
+    labSize = 2,
+    x = 'mean.diff',
+    y = 'P.Value',
+    pointSize = 0.1,
+    xlim = c(-1,1),
+    xlab = "Mean difference in beta values",
+    FCcutoff = 0.5,
+    cutoffLineType = "blank",
+    colCustom = keyvals.colour,
+    title = "Day 0 vs day 13",
+    subtitle = "146870 significant CpGs",
+    caption = "")
+dev.copy(pdf,paste0("MeanDiff_CtrlDay0vsDay13.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+#Plot modified Manhattan plot
+b_13_mean$chr = factor(b_13_mean$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+
+ggplot(b_13_mean, aes(factor(pos), mean.diff))+
+  geom_point(size=1, alpha=0.2) +
+  facet_grid(~ chr, scales="free", space="free")+
+  geom_hline(yintercept = 0)+
+  xlab("") + 
+  labs(title = "Day 13 control vs day 0 control") +
+  ylab("Mean difference in beta values") +
+  ylim(-1,1)+theme(axis.ticks = element_blank(),axis.text.x = element_blank())
+```
+
+
+```{r Mean difference in BETAS D0-D20}
+##Day 0 vs day 20
+#identical(rownames(d20_avg_beta), rownames(d0_avg_beta)) #True
+d20_d0mean_beta = d20_avg_beta - d0_avg_beta #Mean difference baseline to day 20 
+colnames(d20_d0mean_beta) = "mean.diff" 
+
+#identical(rownames(t_b_20), rownames(d20_d0mean_beta)) #False
+d20_d0mean_beta = d20_d0mean_beta[order(match(rownames(d20_d0mean_beta), t_b_20$Name)), , drop = FALSE]#Change order of mean.diff so identical with t_b_20
+#identical(rownames(t_b_20), rownames(d20_d0mean_beta)) #TRUE
+
+b_20_mean = cbind(t_b_20, d20_d0mean_beta)  #Merge with annotated DM result
+DMP020 = rownames(b_20_mean) %in% rownames(r_b_20) 
+
+top10_020 = rownames(r_b_20)[1:10]
+
+keyvals.colour <- ifelse(
+    b_20_mean$adj.P.Val >= 0.01 |  b_20_mean$adj.P.Val == "NA", 'grey30',
+      ifelse(b_20_mean$adj.P.Val < 0.01, 'red2',
+        'grey30'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'grey30'
+  names(keyvals.colour)[keyvals.colour == 'red2'] <- 'Significant (p < 0.01)'
+  names(keyvals.colour)[keyvals.colour == 'black'] <- '?'
+  names(keyvals.colour)[keyvals.colour == 'grey30'] <- 'Not significant'
+
+EnhancedVolcano(b_20_mean,
+    lab = b_13_mean$cgid,
+    selectLab = "",
+    labSize = 2,
+    x = 'mean.diff',
+    y = 'P.Value',
+    pointSize = 0.1,
+    xlim = c(-1,1),
+    xlab = "Mean difference in beta values",
+    FCcutoff = 0.5,
+    cutoffLineType = "blank",
+    colCustom = keyvals.colour,
+    title = "Day 0 vs day 20",
+    subtitle = "210049 significant CpGs",
+    caption = "")
+dev.copy(pdf,paste0("MeanDiff_CtrlDay0vsDay20.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+#Plot modified Manhattan plot
+b_20_mean$chr = factor(b_20_mean$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+
+ggplot(b_20_mean, aes(factor(pos), mean.diff))+
+  geom_point(size=1, alpha=0.2) +
+  facet_grid(~ chr, scales="free", space="free")+
+  geom_hline(yintercept = 0)+
+  xlab("") + 
+  labs(title = "Day 20 control vs day 0 control") +
+  ylab("Mean difference in beta values") +
+  ylim(-1,1)+theme(axis.ticks = element_blank(),axis.text.x = element_blank())
+```
+
+
+```{r Mean difference in BETAS D7-D13}
+##Day 7 vs day 13
+#identical(rownames(d13_avg_beta), rownames(d7_avg_beta)) #True
+d13_d7mean_beta = d13_avg_beta - d7_avg_beta #Mean difference day 7 to day 13 
+colnames(d13_d7mean_beta) = "mean.diff" 
+
+#identical(rownames(t_7_13), rownames(d13_d7mean_beta)) #False
+d13_d7mean_beta = d13_d7mean_beta[order(match(rownames(d13_d7mean_beta), t_7_13$Name)), , drop = FALSE] #Change order of mean.diff so identical with t_7_13
+identical(rownames(t_7_13), rownames(d13_d7mean_beta)) #TRUE
+
+d7_13_mean = cbind(t_7_13, d13_d7mean_beta) #Merge with annotated DM result
+DMP713 = rownames(d7_13_mean) %in% rownames(r_7_13)
+
+top10_713 = rownames(r_7_13)[1:10]
+
+keyvals.colour <- ifelse(
+    d7_13_mean$adj.P.Val >= 0.01 |  d7_13_mean$adj.P.Val == "NA", 'grey30',
+      ifelse(d7_13_mean$adj.P.Val < 0.01, 'red2',
+        'grey30'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'grey30'
+  names(keyvals.colour)[keyvals.colour == 'red2'] <- 'Significant (p < 0.01)'
+  names(keyvals.colour)[keyvals.colour == 'black'] <- '?'
+  names(keyvals.colour)[keyvals.colour == 'grey30'] <- 'Not significant'
+
+EnhancedVolcano(d7_13_mean,
+    lab = d7_13_mean$cgid,
+    selectLab = "",
+    labSize = 2,
+    x = 'mean.diff',
+    y = 'P.Value',
+    pointSize = 0.1,
+    xlim = c(-1,1),
+    xlab = "Mean difference in beta values",
+    FCcutoff = 0.5,
+    cutoffLineType = "blank",
+    colCustom = keyvals.colour,
+    title = "Day 0 vs day 20",
+    subtitle = "39545 significant CpGs",
+    caption = "")
+dev.copy(pdf,paste0("MeanDiff_CtrlDay7vsDay13.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+#Plot modified Manhattan plot
+d7_13_mean$chr = factor(d7_13_mean$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+
+ggplot(d7_13_mean, aes(factor(pos), mean.diff))+
+  geom_point(size=1, alpha=0.2) +
+  facet_grid(~ chr, scales="free", space="free")+
+  geom_hline(yintercept = 0)+
+  xlab("") + 
+  labs(title = "Day 13 control vs day 7 control") +
+  ylab("Mean difference in beta values") +
+  ylim(-1,1)+theme(axis.ticks = element_blank(),axis.text.x = element_blank())
+```
+
+
+```{r Mean difference in BETAS D7-D20}
+##Day 7 vs day 20
+#identical(rownames(d20_avg_beta), rownames(d7_avg_beta)) #True
+d20_d7mean_beta = d20_avg_beta - d7_avg_beta #Mean difference day 7 to day 20 
+colnames(d20_d7mean_beta) = "mean.diff" 
+
+#identical(rownames(t_7_20), rownames(d20_d7mean_beta)) #False
+d20_d7mean_beta = d20_d7mean_beta[order(match(rownames(d20_d7mean_beta), t_7_20$Name)), , drop = FALSE] #Change order of mean.diff so identical with t_7_20
+identical(rownames(t_7_20), rownames(d20_d7mean_beta)) #TRUE
+
+d7_20_mean = cbind(t_7_20, d20_d7mean_beta) #Merge with annotated DM result
+DMP720 = rownames(d7_20_mean) %in% rownames(r_7_20)
+
+top10_720 = rownames(r_7_20)[1:10]
+
+keyvals.colour <- ifelse(
+    d7_20_mean$adj.P.Val >= 0.01 |  d7_20_mean$adj.P.Val == "NA", 'grey30',
+      ifelse(d7_20_mean$adj.P.Val < 0.01, 'red2',
+        'grey30'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'grey30'
+  names(keyvals.colour)[keyvals.colour == 'red2'] <- 'Significant (p < 0.01)'
+  names(keyvals.colour)[keyvals.colour == 'black'] <- '?'
+  names(keyvals.colour)[keyvals.colour == 'grey30'] <- 'Not significant'
+
+EnhancedVolcano(d7_20_mean,
+    lab = d7_20_mean$cgid,
+    selectLab = "",
+    labSize = 2,
+    x = 'mean.diff',
+    y = 'P.Value',
+    pointSize = 0.1,
+    xlim = c(-1,1),
+    xlab = "Mean difference in beta values",
+    FCcutoff = 0.5,
+    cutoffLineType = "blank",
+    colCustom = keyvals.colour,
+    title = "Day 0 vs day 20",
+    subtitle = "122781 significant CpGs",
+    caption = "")
+dev.copy(pdf,paste0("MeanDiff_CtrlDay7vsDay20.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+#Plot modified Manhattan plot
+d7_20_mean$chr = factor(d7_20_mean$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+
+ggplot(d7_20_mean, aes(factor(pos), mean.diff))+
+  geom_point(size=1, alpha=0.2) +
+  facet_grid(~ chr, scales="free", space="free")+
+  geom_hline(yintercept = 0)+
+  xlab("") + 
+  labs(title = "Day 20 control vs day 7 control") +
+  ylab("Mean difference in beta values") +
+  ylim(-1,1)+theme(axis.ticks = element_blank(),axis.text.x = element_blank())
+```
+
+
+```{r Mean difference in BETAS D13-D20}
+##Day 13 vs day 20
+#identical(rownames(d20_avg_beta), rownames(d13_avg_beta)) True
+d20_d13mean_beta = d20_avg_beta - d13_avg_beta #Mean difference day 13 to day 20 
+colnames(d20_d13mean_beta) = "mean.diff" 
+
+#identical(rownames(t_13_20), rownames(d20_d13mean_beta)) #False
+d20_d13mean_beta = d20_d13mean_beta[order(match(rownames(d20_d13mean_beta), t_13_20$Name)), , drop = FALSE]  #Change order of mean.diff so identical with t_13_20
+identical(rownames(t_13_20), rownames(d20_d13mean_beta)) #TRUE
+
+d13_20_mean = cbind(t_13_20, d20_d13mean_beta) #Merge with annotated DM result
+DMP1320 = rownames(d13_20_mean) %in% rownames(r_13_20)
+
+top10_1320 = rownames(r_13_20)[1:10]
+
+keyvals.colour <- ifelse(
+    d13_20_mean$adj.P.Val >= 0.01 |  d13_20_mean$adj.P.Val == "NA", 'grey30',
+      ifelse(d13_20_mean$adj.P.Val < 0.01, 'red2',
+        'grey30'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'grey30'
+  names(keyvals.colour)[keyvals.colour == 'red2'] <- 'Significant (p < 0.01)'
+  names(keyvals.colour)[keyvals.colour == 'black'] <- '?'
+  names(keyvals.colour)[keyvals.colour == 'grey30'] <- 'Not significant'
+
+EnhancedVolcano(d13_20_mean,
+    lab = d13_20_mean$cgid,
+    selectLab = "",
+    labSize = 2,
+    x = 'mean.diff',
+    y = 'P.Value',
+    pointSize = 0.1,
+    xlim = c(-1,1),
+    xlab = "Mean difference in beta values",
+    FCcutoff = 0.5,
+    cutoffLineType = "blank",
+    colCustom = keyvals.colour,
+    title = "Day 0 vs day 20",
+    subtitle = "47676 significant CpGs",
+    caption = "")
+dev.copy(pdf,paste0("MeanDiff_CtrlDay7vsDay20.pdf"),width = 10,height = 10, paper='special')
+dev.off()
+
+
+#Plot modified Manhattan plot
+d13_20_mean$chr = factor(d13_20_mean$chr, levels = c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+                                                     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17","chr18", "chr19", "chr20", "chr21", "chr22","chrX", "chrY"))
+
+ggplot(d13_20_mean, aes(factor(pos), mean.diff))+
+  geom_point(size=1, alpha=0.2) +
+  facet_grid(~ chr, scales="free", space="free")+
+  geom_hline(yintercept = 0)+
+  xlab("") + 
+  labs(title = "Day 20 control vs day 13 control") +
+  ylab("Mean difference in beta values") +
+  ylim(-1,1)+theme(axis.ticks = element_blank(),axis.text.x = element_blank())
+```
+
+
+
+## Beta values for top 4 significant CpGs
+```{r Plot significant sites for exploration}
+par(mfrow=c(2,2))
+sapply(rownames(r_b_7)[1:4], function(cpg){
+  plotCpg(betas, cpg=cpg, pheno=targets$Group, ylab = "Beta values")})
+
+par(mfrow=c(2,2))
+sapply(rownames(r_b_13)[1:4], function(cpg){
+  plotCpg(betas, cpg=cpg, pheno=targets$Group, ylab = "Beta values")})
+
+par(mfrow=c(2,2))
+sapply(rownames(r_b_20)[1:4], function(cpg){
+  plotCpg(betas, cpg=cpg, pheno=targets$Group, ylab = "Beta values")})
+
+par(mfrow=c(2,2))
+sapply(rownames(r_7_13)[1:4], function(cpg){
+  plotCpg(betas, cpg=cpg, pheno=targets$Group, ylab = "Beta values")})
+
+par(mfrow=c(2,2))
+sapply(rownames(r_7_20)[1:4], function(cpg){
+  plotCpg(betas, cpg=cpg, pheno=targets$Group, ylab = "Beta values")})
+
+par(mfrow=c(2,2))
+sapply(rownames(r_13_20)[1:4], function(cpg){
+  plotCpg(betas, cpg=cpg, pheno=targets$Group, ylab = "Beta values")})
+```
+
+
+## Visualize methylation levels for marker genes. 
+##GENE track plot
+
+```{r load data from MORE analysis}
+
+load(file ="/Integration/GLMresultsD20vsD0.RData")
+
+edb <- EnsDb.Hsapiens.v86
+g <- genes(edb)
+length(g)
+```
+
+```{r POU5F1}
+#Significant CpGs from MORE analysis
+sig = GLMresults$ResultsPerGene$ENSG00000204531$significantRegulators
+
+#Find all CpGs annotated to gene
+POU5F1cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "POU5F1") 
+POU5F1cpgs =POU5F1cpgs$cgid
+
+POU5F1cpgs2 = subset(annoEPICsub, subset = cgid %in% POU5F1cpgs, select = c("Start_hg38")) #Subset start pos for CpGs in annoEPICsub
+POU5F1betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(POU5F1cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(POU5F1betas), rownames(POU5F1cpgs2)) #TRUE
+POU5F1betas = cbind(POU5F1betas, POU5F1cpgs2) #combine dfs so position and betas are in same df
+POU5F1betas$cgid = rownames(POU5F1betas)
+POU5F1betas2 <- POU5F1betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.) #Make long dataframe for plotting
+
+#Combine with targets for group_identity
+joined_POU5F1 <- merge(POU5F1betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset start pos for significant CpGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_POU5F1, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  #geom_point()+
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 1)+
+  #geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +
+  labs(title = "POU5F1 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.1,0.2))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000204531",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+grl[[1]] = NULL
+names(grl)=c(" ")
+
+#plotting track using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + theme_clear()
+ 
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "POU5F1"=p2, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("POU5F1betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+ggplot(joined_POU5F1, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "POU5F1 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+```
+
+
+```{r CHD2}
+#Significant CpGs from MORE analysis
+sig = GLMresultsD20vsD0$ResultsPerGene$ENSG00000170558$significantRegulators
+
+CDH2cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "CDH2")
+CDH2cpgs =CDH2cpgs$cgid
+
+CDH2cpgs2 = subset(annoEPICsub, subset = cgid %in% CDH2cpgs, select = c("Start_hg38")) #Subset CPGs
+CDH2betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(CDH2cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(CDH2betas), rownames(CDH2cpgs2)) #TRUE
+
+CDH2betas = cbind(CDH2betas, CDH2cpgs2) #combine dfs so position and betas are in same df
+CDH2betas$cgid = rownames(CDH2betas)
+CDH2betas2 <- CDH2betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_CDH2 <- merge(CDH2betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset CPGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_CDH2, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 1)+
+  labs(title = "CDH2 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.1,0.2))
+
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000170558",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+grl = grl[1]
+#grl=split(gr.edb, gr.edb$tx_id)
+#grl = grl[1]
+names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + theme_clear()+
+  scale_x_continuous(breaks = seq(27800000, 28200000,40000))
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "CDH2"=p2, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("CDH2betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+
+ggplot(joined_CDH2, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "CDH2 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+```
+
+
+```{r CHD1}
+sig = GLMresultsD20vsD0$ResultsPerGene$ENSG00000039068$significantRegulators
+
+CDH1cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "CDH1")
+CDH1cpgs =CDH1cpgs$cgid
+
+CDH1cpgs2 = subset(annoEPICsub, subset = cgid %in% CDH1cpgs, select = c("Start_hg38")) #Subset CPGs
+CDH1betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(CDH1cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(CDH1betas), rownames(CDH1cpgs2)) #TRUE
+
+CDH1betas = cbind(CDH1betas, CDH1cpgs2) #combine dfs so position and betas are in same df
+CDH1betas$cgid = rownames(CDH1betas)
+CDH1betas2 <- CDH1betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+targets_ctr_small = subset(targets_ctr, select = c(Sample_Name, timepoint))
+joined_CDH1 <- merge(CDH1betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset CPGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+p1 = ggplot(joined_CDH1, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 1)+
+  labs(title = "CDH1 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.9,0.2))
+
+
+#Make gene model from GRangesList object
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+grl = grl[1]
+grl=split(gr.edb, gr.edb$tx_id)
+grl = grl[1]
+names(grl)=c(" ")
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "CDH1"=p2, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("CDH1betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+ggplot(joined_CDH1, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "CDH1 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+```
+
+```{r CDKN1C}
+sig = GLMresultsD20vsD0$ResultsPerGene$ENSG00000129757$significantRegulators
+
+CDKN1Ccpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "CDKN1C")
+CDKN1Ccpgs =CDKN1Ccpgs$cgid
+
+CDKN1Ccpgs2 = subset(annoEPICsub, subset = cgid %in% CDKN1Ccpgs, select = c("Start_hg38")) #Subset CPGs
+CDKN1Cbetas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(CDKN1Ccpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(CDKN1Cbetas), rownames(CDKN1Ccpgs2)) #TRUE
+
+CDKN1Cbetas = cbind(CDKN1Cbetas, CDKN1Ccpgs2) #combine dfs so position and betas are in same df
+CDKN1Cbetas$cgid = rownames(CDKN1Cbetas)
+CDKN1Cbetas2 <- CDKN1Cbetas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+targets_ctr_small = subset(targets_ctr, select = c(Sample_Name, timepoint))
+joined_CDKN1C <- merge(CDKN1Cbetas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset CPGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+p1 = ggplot(joined_CDKN1C, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  #geom_point()+
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 1)+
+  #geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +
+  labs(title = "CDKN1C CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.1,0.2))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000129757",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+grl = grl[1]
+grl=split(gr.edb, gr.edb$tx_id)
+grl = grl[2]
+names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "CDKN1C"=p2, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("CDKN1Cbetas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+ggplot(joined_CDKN1C, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "CDKN1C CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+```
+
+
+```{r FOXH1}
+sig = GLMresultsD20vsD0$ResultsPerGene$ENSG00000160973$significantRegulators
+
+FOXH1cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "FOXH1")
+FOXH1cpgs =FOXH1cpgs$cgid
+
+FOXH1cpgs2 = subset(annoEPICsub, subset = cgid %in% FOXH1cpgs, select = c("Start_hg38")) #Subset CPGs
+FOXH1betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(FOXH1cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(FOXH1betas), rownames(FOXH1cpgs2)) #TRUE
+
+FOXH1betas = cbind(FOXH1betas, FOXH1cpgs2) #combine dfs so position and betas are in same df
+FOXH1betas$cgid = rownames(FOXH1betas)
+FOXH1betas2 <- FOXH1betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+targets_ctr_small = subset(targets_ctr, select = c(Sample_Name, timepoint))
+joined_FOXH1 <- merge(FOXH1betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset CPGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_FOXH1, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 1)+
+  labs(title = "FOXH1 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.1,0.2))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000160973",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+#grl = grl[1]
+grl=split(gr.edb, gr.edb$tx_id)
+grl = grl[1]
+names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "FOXH1"=p2, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("FOXH1Cbetas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+ggplot(joined_FOXH1, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "FOXH1 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+
+```
+
+
+```{r TAGLN3}
+sig = GLMresultsD20vsD0$ResultsPerGene$ENSG00000144834$significantRegulators
+
+TAGLN3cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "TAGLN3")
+TAGLN3cpgs =TAGLN3cpgs$cgid
+
+TAGLN3cpgs2 = subset(annoEPICsub, subset = cgid %in% TAGLN3cpgs, select = c("Start_hg38")) #Subset CPGs
+TAGLN3betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(TAGLN3cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(TAGLN3betas), rownames(TAGLN3cpgs2)) #TRUE
+
+TAGLN3betas = cbind(TAGLN3betas, TAGLN3cpgs2) #combine dfs so position and betas are in same df
+TAGLN3betas$cgid = rownames(TAGLN3betas)
+TAGLN3betas2 <- TAGLN3betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+targets_ctr_small = subset(targets_ctr, select = c(Sample_Name, timepoint))
+joined_TAGLN3 <- merge(TAGLN3betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset CPGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_TAGLN3, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 1)+
+  labs(title = "TAGLN3 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.05,0.2))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000144834",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+#grl = grl[1]
+grl=split(gr.edb, gr.edb$tx_id)
+grl = grl[1]
+names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + theme_clear()
+ #dersom du vil merke ut noen spesielle seter som er signifikante
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "TAGLN3"=p2, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("TAGLN3betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+ggplot(joined_TAGLN3, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "TAGLN3 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+```
+
+
+```{r NES}
+sig = GLMresultsMarkers$ResultsPerGene$ENSG00000132688$significantRegulators
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset CPGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+NEScpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "NES")
+NEScpgs =NEScpgs$cgid
+#Subset probes for each marker gene in annoEPICsub
+
+NEScpgs2 = subset(annoEPICsub, subset = cgid %in% NEScpgs, select = c("Start_hg38")) #Subset CPGs
+NESbetas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(NEScpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(NESbetas), rownames(NEScpgs2)) #TRUE
+
+NESbetas = cbind(NESbetas, NEScpgs2) #combine dfs so position and betas are in same df
+NESbetas$cgid = rownames(NESbetas)
+NESbetas2 <- NESbetas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_NES <- merge(NESbetas2, targets_ctr_small, by = "Sample_Name")
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_NES, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.8)+
+  labs(title = "NES CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.08,0.7))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000132688",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model)) +  theme_clear()+
+geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") 
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "NES"=p2, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("NESbetas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+ggplot(joined_NES, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "NES CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+
+```
+
+
+
+```{r TUBB3}
+#TUBB3
+sig = GLMresultsMarkers$ResultsPerGene$ENSG00000258947$significantRegulators
+sigPos = subset(annoEPICsub, subset = cgid %in% sig, select = c("Start_hg38")) #Subset CPGs
+sigPos = sigPos$Start_hg38
+sigPos = as.numeric(sigPos)
+
+TUBB3cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "TUBB3")
+TUBB3cpgs =TUBB3cpgs$cgid
+#Subset probes for each marker gene in annoEPICsub
+
+TUBB3cpgs2 = subset(annoEPICsub, subset = cgid %in% TUBB3cpgs, select = c("Start_hg38")) #Subset CPGs
+TUBB3betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(TUBB3cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(TUBB3betas), rownames(TUBB3cpgs2)) #TRUE
+
+TUBB3betas = cbind(TUBB3betas, TUBB3cpgs2) #combine dfs so position and betas are in same df
+TUBB3betas$cgid = rownames(TUBB3betas)
+TUBB3betas2 <- TUBB3betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_TUBB3 <- merge(TUBB3betas2, targets_ctr_small, by = "Sample_Name")
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_TUBB3, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash")+
+  labs(title = "TUBB3 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.08,0.2))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000258947",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+grl[[1]] = NULL
+#grl=split(gr.edb, gr.edb$tx_id)
+#grl = grl[1]
+names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model)) + theme_clear() + 
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash")
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "TUBB3"=p3, heights=c(1.5,0.5))
+
+p3
+dev.copy(pdf,paste0("TUBB3betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+ggplot(joined_TUBB3, aes(x = as.factor(Start_hg38), y = beta, col = timepoint)) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  labs(title = "TUBB3 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_few() +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line")+
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = "bottom")+
+  geom_vline(xintercept=as.factor(sigPos),col="darkgrey", linetype = "longdash")
+```
+
+```{r function for calculation mean and sd}
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- plyr::rename(data_sum,c("mean" = varname))
+ return(data_sum)
+}
+
+```
+
+
+```{r nonCpG sites}
+
+nonCpGD0D20 = r_b_20 %>%  dplyr::filter(cgid %in% nonCpG$cgid)
+write.table(nonCpGD0D20, "SignificantnonCpGsites_D0D20.txt", sep = "\t")
+
+nonCpGD0D7 = r_b_7 %>%  dplyr::filter(cgid %in% nonCpG$cgid)
+write.table(nonCpGD0D7, "SignificantnonCpGsites_D0D7.txt", sep = "\t")
+
+nonCpGD7D13 = r_7_13 %>%  dplyr::filter(cgid %in% nonCpG$cgid)
+write.table(nonCpGD7D13, "SignificantnonCpGsites_D7D13.txt", sep = "\t")
+
+nonCpGD13D20 = r_13_20 %>%  dplyr::filter(cgid %in% nonCpG$cgid)
+write.table(nonCpGD13D20, "SignificantnonCpGsites_D13D20.txt", sep = "\t")
+```
+
+```{r load data}
+load("normcounts.df.RData") #RNA-seq normalized counts
+normcounts.df$EnsemblGeneID = rownames(normcounts.df)
+design = read.table("/Integration/design-control.txt", header = TRUE)
+```
+
+##Plot gene track and lineplots with significant DMs/exp. NON-CpGs marked in red.
+```{r TACC3 NON-CpGs}
+
+TACC3cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "TACC3")
+TACC3cpgs =TACC3cpgs$cgid #All CpGs annotated to a gene
+
+TACC3cpgsDMsig = subset(r_b_20, subset = cgid %in% TACC3cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+TACC3cpgs2 = subset(annoEPICsub, subset = cgid %in% TACC3cpgs, select = c("Start_hg38")) #Subset CPGs start position
+TACC3betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(TACC3cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(TACC3cpgs2), rownames(TACC3betas)) #TRUE
+
+TACC3betas = cbind(TACC3betas, TACC3cpgs2) #combine dfs so position and betas are in same df
+TACC3betas$cgid = rownames(TACC3betas)
+TACC3betas2 <- TACC3betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_TACC3 <- merge(TACC3betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(TACC3cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(TACC3cpgsDMsig$Start_hg38[1]) #starts with "ch"
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_TACC3, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "TACC3 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+  
+#Make gene model from GRangesList object
+wh=g["ENSG00000013810",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+grl = grl[1]
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(1, 3, 6, 11:12)]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()#+
+ # scale_x_continuous(breaks = seq(27800000, 28200000,40000))
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "TACC3"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("TACC3betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+
+#TACC3-Lineplot------------------------------------------------------------------------------------------------
+increase = r_b_20[which(r_b_20$logFC > 0),]
+decrease = r_b_20[which(r_b_20$logFC < 0),]
+
+increase2 = increase[which(increase$cgid %in% TACC3cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% TACC3cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+TACC3betas3 = TACC3betas2 %>% dplyr::filter(cgid %in% TACC3cpgsDMsig$cgid) #Filter out DM cgids
+TACC3betas4 = TACC3betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+TACC3_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000013810") 
+TACC3_NC = TACC3_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+TACC3combined = merge(TACC3betas4, TACC3_NC, by = "Sample_Name")
+TACC3combined = merge(TACC3combined, design, by = "Sample_Name")
+
+TACC3betas <- data_summary(TACC3combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(TACC3betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0, position=position_dodge(0.05))+
+  geom_line(data = TACC3betas[TACC3betas$cgid == "ch.4.71452R",], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = TACC3betas[TACC3betas$cgid == "ch.4.71452R",],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+
+
+TACC3counts <- data_summary(data = TACC3combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(TACC3counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("TACC3-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+
+```
+
+```{r SEMA3F}
+
+SEMA3Fcpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "SEMA3F")
+SEMA3Fcpgs =SEMA3Fcpgs$cgid #Alle CpGs annotated to gene
+
+SEMA3FcpgsDMsig = subset(r_b_20, subset = cgid %in% SEMA3Fcpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+SEMA3Fcpgs2 = subset(annoEPICsub, subset = cgid %in% SEMA3Fcpgs, select = c("Start_hg38")) #Subset CPGs start position
+SEMA3Fbetas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(SEMA3Fcpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(SEMA3Fcpgs2), rownames(SEMA3Fbetas)) #TRUE
+
+SEMA3Fbetas = cbind(SEMA3Fbetas, SEMA3Fcpgs2) #combine dfs so position and betas are in same df
+SEMA3Fbetas$cgid = rownames(SEMA3Fbetas)
+SEMA3Fbetas2 <- SEMA3Fbetas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_SEMA3F <- merge(SEMA3Fbetas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(SEMA3FcpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(SEMA3FcpgsDMsig$Start_hg38[1])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_SEMA3F, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  #geom_point()+
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  #geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +
+  labs(title = "SEMA3F CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000001617",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$gene_id)
+grl = grl[1]
+grl=split(gr.edb, gr.edb$tx_id)
+grl = grl[c(1,3:10 )]
+names(grl)
+grl = grl[c(1:7)]
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "SEMA3F"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("SEMA3Fbetas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+
+#SEMA3F-Lineplot------------------------------------------------------------------------------------------
+increase2 = increase[which(increase$cgid %in% SEMA3FcpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% SEMA3FcpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+SEMA3Fbetas3 = SEMA3Fbetas2 %>% dplyr::filter(cgid %in% SEMA3FcpgsDMsig$cgid) #Filter out DM cgids
+SEMA3Fbetas4 = SEMA3Fbetas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+SEMA3F_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000001617") 
+SEMA3F_NC = SEMA3F_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+SEMA3Fcombined = merge(SEMA3Fbetas4, SEMA3F_NC, by = "Sample_Name")
+SEMA3Fcombined = merge(SEMA3Fcombined, design, by = "Sample_Name")
+
+SEMA3Fbetas <- data_summary(SEMA3Fcombined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(SEMA3Fbetas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = SEMA3Fbetas[SEMA3Fbetas$cgid == "ch.3.1083063F",], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = SEMA3Fbetas[SEMA3Fbetas$cgid == "ch.3.1083063F",],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+SEMA3Fcounts <- data_summary(data = SEMA3Fcombined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(SEMA3Fcounts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("SEMA3F-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+
+```
+
+```{r KLC1}
+
+KLC1cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "KLC1")
+KLC1cpgs =KLC1cpgs$cgid #All CpGs annotated to gene
+
+KLC1cpgsDMsig = subset(r_b_20, subset = cgid %in% KLC1cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+KLC1cpgs2 = subset(annoEPICsub, subset = cgid %in% KLC1cpgs, select = c("Start_hg38")) #Subset CPGs start posisjon
+KLC1betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(KLC1cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(KLC1cpgs2), rownames(KLC1betas)) #TRUE
+
+KLC1betas = cbind(KLC1betas, KLC1cpgs2) #combine dfs so position and betas are in same df
+KLC1betas$cgid = rownames(KLC1betas)
+KLC1betas2 <- KLC1betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_KLC1 <- merge(KLC1betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(KLC1cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(KLC1cpgsDMsig$Start_hg38[1:2])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_KLC1, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "KLC1 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000126214",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(1:4, 6:7,10:11, 22:30, 33, 35:36,38,40:44,48)]
+grl = grl[c(1:10, 12:14, 17, 19:20, 22, 24:25, 27)]
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "KLC1"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("KLC1betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+
+#KLC1-------------------------------------------------------------------------------------------------
+increase2 = increase[which(increase$cgid %in% KLC1cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% KLC1cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+KLC1betas3 = KLC1betas2 %>% dplyr::filter(cgid %in% KLC1cpgsDMsig$cgid) #Filter out DM cgids
+KLC1betas4 = KLC1betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+KLC1_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000126214") 
+KLC1_NC = KLC1_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+KLC1combined = merge(KLC1betas4, KLC1_NC, by = "Sample_Name")
+KLC1combined = merge(KLC1combined, design, by = "Sample_Name")
+
+KLC1betas <- data_summary(KLC1combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(KLC1betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = KLC1betas[KLC1betas$cgid %in% c("ch.14.1824732F", "ch.14.1823318F"),], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = KLC1betas[KLC1betas$cgid %in% c("ch.14.1824732F", "ch.14.1823318F"),],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+KLC1counts <- data_summary(data = KLC1combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(KLC1counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("KLC1-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+
+```
+
+```{r SOX13}
+
+SOX13cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "SOX13")
+SOX13cpgs =SOX13cpgs$cgid #Alle CpGs annotated to gene
+
+SOX13cpgsDMsig = subset(r_b_20, subset = cgid %in% SOX13cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+SOX13cpgs2 = subset(annoEPICsub, subset = cgid %in% SOX13cpgs, select = c("Start_hg38")) #Subset CPGs start posisjon
+SOX13betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(SOX13cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(SOX13cpgs2), rownames(SOX13betas)) #TRUE
+
+SOX13betas = cbind(SOX13betas, SOX13cpgs2) #combine dfs so position and betas are in same df
+SOX13betas$cgid = rownames(SOX13betas)
+SOX13betas2 <- SOX13betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_SOX13 <- merge(SOX13betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(SOX13cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(SOX13cpgsDMsig$Start_hg38[1])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_SOX13, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "SOX13 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000143842",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(3, 6:7, 10)]
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()#
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "SOX13"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("SOX13betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+
+#SOX13-------------------------------------------------------------------------------------------------
+#increase = r_b_20[which(r_b_20$logFC > 0),]
+#decrease = r_b_20[which(r_b_20$logFC < 0),]
+
+increase2 = increase[which(increase$cgid %in% SOX13cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% SOX13cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+SOX13betas3 = SOX13betas2 %>% dplyr::filter(cgid %in% SOX13cpgsDMsig$cgid) #Filter out DM cgids
+SOX13betas4 = SOX13betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+SOX13_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000143842") 
+SOX13_NC = SOX13_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+SOX13combined = merge(SOX13betas4, SOX13_NC, by = "Sample_Name")
+SOX13combined = merge(SOX13combined, design, by = "Sample_Name")
+
+SOX13betas <- data_summary(SOX13combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(SOX13betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = SOX13betas[SOX13betas$cgid %in% c("ch.1.3958639R"),], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = SOX13betas[SOX13betas$cgid %in% c("ch.1.3958639R"),],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+SOX13counts <- data_summary(data = SOX13combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(SOX13counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("SOX13-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+
+```
+
+```{r NTRK3}
+
+NTRK3cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "NTRK3")
+NTRK3cpgs =NTRK3cpgs$cgid #All CpGs annotated to gene
+
+NTRK3cpgsDMsig = subset(r_b_20, subset = cgid %in% NTRK3cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+NTRK3cpgs2 = subset(annoEPICsub, subset = cgid %in% NTRK3cpgs, select = c("Start_hg38")) #Subset CPGs start posisjon
+NTRK3betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(NTRK3cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(NTRK3cpgs2), rownames(NTRK3betas)) #TRUE
+
+NTRK3betas = cbind(NTRK3betas, NTRK3cpgs2) #combine dfs so position and betas are in same df
+NTRK3betas$cgid = rownames(NTRK3betas)
+NTRK3betas2 <- NTRK3betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_NTRK3 <- merge(NTRK3betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(NTRK3cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(NTRK3cpgsDMsig$Start_hg38[1])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_NTRK3, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "NTRK3 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000140538",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(1:8, 10:13, 15, 18, 21:22)]
+grl = grl[c(1:11, 13:16)]
+#-9, 14, 16, 17,19,  20
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "NTRK3"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("NTRK3betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+#NTRK3-------------------------------------------------------------------------------------------------
+#increase = r_b_20[which(r_b_20$logFC > 0),]
+#decrease = r_b_20[which(r_b_20$logFC < 0),]
+
+increase2 = increase[which(increase$cgid %in% NTRK3cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% NTRK3cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+NTRK3betas3 = NTRK3betas2 %>% dplyr::filter(cgid %in% NTRK3cpgsDMsig$cgid) #Filter out DM cgids
+NTRK3betas4 = NTRK3betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+NTRK3_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000140538") 
+NTRK3_NC = NTRK3_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+#NTRK3combined = bind_rows(NTRK3mVals,NTRK3_NC )
+NTRK3combined = merge(NTRK3betas4, NTRK3_NC, by = "Sample_Name")
+NTRK3combined = merge(NTRK3combined, design, by = "Sample_Name")
+
+NTRK3betas <- data_summary(NTRK3combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(NTRK3betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = NTRK3betas[NTRK3betas$cgid %in% c("ch.15.1497565F"),], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = NTRK3betas[NTRK3betas$cgid %in% c("ch.15.1497565F"),],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+NTRK3counts <- data_summary(data = NTRK3combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(NTRK3counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("NTRK3-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+
+```
+
+```{r FOXN3}
+
+FOXN3cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "FOXN3")
+FOXN3cpgs =FOXN3cpgs$cgid #All CpGs annotated to gene
+
+FOXN3cpgsDMsig = subset(r_b_20, subset = cgid %in% FOXN3cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+FOXN3cpgs2 = subset(annoEPICsub, subset = cgid %in% FOXN3cpgs, select = c("Start_hg38")) #Subset CPGs start posisjon
+FOXN3betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(FOXN3cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(FOXN3cpgs2), rownames(FOXN3betas)) #TRUE
+
+FOXN3betas = cbind(FOXN3betas, FOXN3cpgs2) #combine dfs so position and betas are in same df
+FOXN3betas$cgid = rownames(FOXN3betas)
+FOXN3betas2 <- FOXN3betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_FOXN3 <- merge(FOXN3betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(FOXN3cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(FOXN3cpgsDMsig$Start_hg38[5])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_FOXN3, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "FOXN3 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000053254",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(1:5, 8:10, 12, 14:15, 18, 20:21)]
+grl = grl[c(1:6, 8:12, 14)]
+#- 6,7, 11,13 , 16,17 19
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "FOXN3"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("FOXN3betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+
+#FOXN3-------------------------------------------------------------------------------------------------
+#increase = r_b_20[which(r_b_20$logFC > 0),]
+#decrease = r_b_20[which(r_b_20$logFC < 0),]
+
+increase2 = increase[which(increase$cgid %in% FOXN3cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% FOXN3cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+FOXN3betas3 = FOXN3betas2 %>% dplyr::filter(cgid %in% FOXN3cpgsDMsig$cgid) #Filter out DM cgids
+FOXN3betas4 = FOXN3betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+FOXN3_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000053254") 
+FOXN3_NC = FOXN3_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+FOXN3combined = merge(FOXN3betas4, FOXN3_NC, by = "Sample_Name")
+FOXN3combined = merge(FOXN3combined, design, by = "Sample_Name")
+
+FOXN3betas <- data_summary(FOXN3combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(FOXN3betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = FOXN3betas[FOXN3betas$cgid %in% c("ch.14.1402140F"),], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = FOXN3betas[FOXN3betas$cgid %in% c("ch.14.1402140F"),],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+FOXN3counts <- data_summary(data = FOXN3combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(FOXN3counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("FOXN3-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+
+```
+
+```{r POU6F2}
+
+POU6F2cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "POU6F2")
+POU6F2cpgs =POU6F2cpgs$cgid #All CpGs annotated to genes
+
+POU6F2cpgsDMsig = subset(r_b_20, subset = cgid %in% POU6F2cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+POU6F2cpgs2 = subset(annoEPICsub, subset = cgid %in% POU6F2cpgs, select = c("Start_hg38")) #Subset CPGs start posisjon
+POU6F2betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(POU6F2cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(POU6F2cpgs2), rownames(POU6F2betas)) #TRUE
+
+POU6F2betas = cbind(POU6F2betas, POU6F2cpgs2) #combine dfs so position and betas are in same df
+POU6F2betas$cgid = rownames(POU6F2betas)
+POU6F2betas2 <- POU6F2betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_POU6F2 <- merge(POU6F2betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(POU6F2cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(POU6F2cpgsDMsig$Start_hg38[5])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_POU6F2, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "POU6F2 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000106536",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(1,7)]
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "POU6F2"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("POU6F2betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+
+#POU6F2-------------------------------------------------------------------------------------------------
+#increase = r_b_20[which(r_b_20$logFC > 0),]
+#decrease = r_b_20[which(r_b_20$logFC < 0),]
+
+increase2 = increase[which(increase$cgid %in% POU6F2cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% POU6F2cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+POU6F2betas3 = POU6F2betas2 %>% dplyr::filter(cgid %in% POU6F2cpgsDMsig$cgid) #Filter out DM cgids
+POU6F2betas4 = POU6F2betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+POU6F2_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000106536") 
+POU6F2_NC = POU6F2_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+POU6F2combined = merge(POU6F2betas4, POU6F2_NC, by = "Sample_Name")
+POU6F2combined = merge(POU6F2combined, design, by = "Sample_Name")
+
+POU6F2betas <- data_summary(POU6F2combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(POU6F2betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = POU6F2betas[POU6F2betas$cgid %in% c("ch.7.924839R"),], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = POU6F2betas[POU6F2betas$cgid %in% c("ch.7.924839R"),],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+POU6F2counts <- data_summary(data = POU6F2combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(POU6F2counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("POU6F2-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+```
+
+```{r PAPPA2}
+
+PAPPA2cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "PAPPA2")
+PAPPA2cpgs =PAPPA2cpgs$cgid #All CpGs annotated to gene
+
+PAPPA2cpgsDMsig = subset(r_b_20, subset = cgid %in% PAPPA2cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+PAPPA2cpgs2 = subset(annoEPICsub, subset = cgid %in% PAPPA2cpgs, select = c("Start_hg38")) #Subset CPGs start posisjon
+PAPPA2betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(PAPPA2cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(PAPPA2cpgs2), rownames(PAPPA2betas)) #TRUE
+
+PAPPA2betas = cbind(PAPPA2betas, PAPPA2cpgs2) #combine dfs so position and betas are in same df
+PAPPA2betas$cgid = rownames(PAPPA2betas)
+PAPPA2betas2 <- PAPPA2betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_PAPPA2 <- merge(PAPPA2betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(PAPPA2cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(PAPPA2cpgsDMsig$Start_hg38[1])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_PAPPA2, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "PAPPA2 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000116183",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(1,2)]
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "PAPPA2"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("PAPPA2betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+#PAPPA2-------------------------------------------------------------------------------------------------
+#increase = r_b_20[which(r_b_20$logFC > 0),]
+#decrease = r_b_20[which(r_b_20$logFC < 0),]
+
+increase2 = increase[which(increase$cgid %in% PAPPA2cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% PAPPA2cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+PAPPA2betas3 = PAPPA2betas2 %>% dplyr::filter(cgid %in% PAPPA2cpgsDMsig$cgid) #Filter out DM cgids
+PAPPA2betas4 = PAPPA2betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+PAPPA2_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000116183") 
+PAPPA2_NC = PAPPA2_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+PAPPA2combined = merge(PAPPA2betas4, PAPPA2_NC, by = "Sample_Name")
+PAPPA2combined = merge(PAPPA2combined, design, by = "Sample_Name")
+
+PAPPA2betas <- data_summary(PAPPA2combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(PAPPA2betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = PAPPA2betas[PAPPA2betas$cgid %in% c("ch.1.3439660F"),], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = PAPPA2betas[PAPPA2betas$cgid %in% c("ch.1.3439660F"),],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+PAPPA2counts <- data_summary(data = PAPPA2combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(PAPPA2counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("PAPPA2-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+```
+
+```{r DHX8}
+
+DHX8cpgs =uniqueGenes %>% dplyr::filter(external_gene_name == "DHX8")
+DHX8cpgs =DHX8cpgs$cgid #All CpGs annotated to gene
+
+DHX8cpgsDMsig = subset(r_b_20, subset = cgid %in% DHX8cpgs) #Significant CpGs i DM analysis D0vsD20 annotated to gene
+
+DHX8cpgs2 = subset(annoEPICsub, subset = cgid %in% DHX8cpgs, select = c("Start_hg38")) #Subset CPGs start posisjon
+DHX8betas = subset(betas_ctr_df, subset = rownames(betas_ctr_df) %in% rownames(DHX8cpgs2)) # Subset beta values for all samples per cpg
+
+identical(rownames(DHX8cpgs2), rownames(DHX8betas)) #TRUE
+
+DHX8betas = cbind(DHX8betas, DHX8cpgs2) #combine dfs so position and betas are in same df
+DHX8betas$cgid = rownames(DHX8betas)
+DHX8betas2 <- DHX8betas %>% pivot_longer(-c(Start_hg38, cgid), names_to = "Sample_Name", values_to = "beta") %>% remove_rownames(.)
+
+#Combine with targets for group_identity
+joined_DHX8 <- merge(DHX8betas2, targets_ctr_small, by = "Sample_Name")
+
+sigPos = as.numeric(DHX8cpgsDMsig$Start_hg38) #Subset significant CPGs positions - overlapping MORE and DM
+sigPosnonCpG = as.numeric(DHX8cpgsDMsig$Start_hg38[1:2])
+
+#Plot betavalues for each probe/gene, mapping on x
+p1 = ggplot(joined_DHX8, aes(x = as.numeric(Start_hg38), y = beta, col = timepoint)) +
+  geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") +
+  geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") +
+  stat_summary(aes(y = beta, group = timepoint), fun = mean, geom = "line", size = 0.5)+
+  labs(title = "DHX8 CpGs", x = "Chromosome position", y = "Beta value", col = "Day" )+
+  scale_color_manual(values = daycols) +
+  theme_clear() +
+  theme(axis.text.x = element_text(angle = 45), panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), legend.position = c(0.95,0.9))
+
+#Make gene model from GRangesList object
+wh=g["ENSG00000067596",]
+seqlevels(wh) = sub(seqlevels(wh), pattern="chr", replacement="")
+gr.edb=crunch(edb, which = wh)
+colnames(values(gr.edb))[4]="model"
+grl=split(gr.edb, gr.edb$tx_id)
+names(grl)
+grl = grl[c(1:2, 4:5)]
+#grl = grl[1]
+#names(grl)=c(" ")
+
+#plotting using autoplot in ggbio
+p2=autoplot(grl, aes(type=model))+ geom_vline(xintercept=sigPos,col="darkgrey", linetype = "longdash") + geom_vline(xintercept=sigPosnonCpG,col="red", linetype = "longdash") + theme_clear()
+
+#####plotting all using tracks
+p3=tracks("DNA methylation"=p1, "DHX8"=p2, heights=c(1.5,0.8))
+
+p3
+dev.copy(pdf,paste0("DHX8betas-track.pdf"),width = 10,height = 6, paper='special')
+dev.off()
+
+#DHX8-------------------------------------------------------------------------------------------------
+#increase = r_b_20[which(r_b_20$logFC > 0),]
+#decrease = r_b_20[which(r_b_20$logFC < 0),]
+
+increase2 = increase[which(increase$cgid %in% DHX8cpgsDMsig$cgid),]
+increase2 = increase2$cgid
+
+decrease2 = decrease[which(decrease$cgid %in% DHX8cpgsDMsig$cgid),]
+decrease2 = decrease2$cgid
+
+DHX8betas3 = DHX8betas2 %>% dplyr::filter(cgid %in% DHX8cpgsDMsig$cgid) #Filter out DM cgids
+DHX8betas4 = DHX8betas3 %>% mutate(direction = ifelse(cgid %in% increase2, "increase", "decrease"))
+
+DHX8_NC = normcounts.df %>% dplyr::filter(EnsemblGeneID == "ENSG00000067596") 
+DHX8_NC = DHX8_NC %>% pivot_longer(cols = -c(EnsemblGeneID), names_to = "Sample_Name", values_to = "NormalizedCounts")
+
+DHX8combined = merge(DHX8betas4, DHX8_NC, by = "Sample_Name")
+DHX8combined = merge(DHX8combined, design, by = "Sample_Name")
+
+DHX8betas <- data_summary(DHX8combined, varname="beta", 
+                    groupnames=c("Day", "cgid", "direction"))
+
+a = ggplot(DHX8betas)+
+  geom_line(aes(x = as.factor(Day), y = beta,group = cgid)) + 
+  geom_errorbar(aes(x = as.factor(Day), y = beta,group = cgid, ymin=beta-sd, ymax=beta+sd), width=0)+
+  geom_line(data = DHX8betas[DHX8betas$cgid %in% c("ch.17.1131311F", "ch.17.1132347R"),], aes(x = as.factor(Day), y = beta,group = cgid), col = "red") + 
+  geom_point(aes(x = as.factor(Day), y = beta,group = cgid))+
+  geom_point(data = DHX8betas[DHX8betas$cgid %in% c("ch.17.1131311F", "ch.17.1132347R"),],aes(x = as.factor(Day), y = beta,group = cgid), col = "red")+
+  labs(x = "", y = "DNAm levels (beta values)") +
+  scale_y_continuous(limits=c(0, 1)) + 
+  theme_few()+
+  facet_wrap(~ direction) +
+theme(legend.position= "bottom", legend.key.size = unit(0.1, "cm"), legend.key.width = unit(0.1,"cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8))
+
+DHX8counts <- data_summary(data = DHX8combined, varname="NormalizedCounts", 
+                    groupnames=c("Day", "EnsemblGeneID"))
+
+b = ggplot(DHX8counts, aes(x = as.factor(Day), y = NormalizedCounts,group = EnsemblGeneID), col = "Black")+
+  geom_line() + 
+  geom_point()+
+  geom_errorbar(aes(ymin=NormalizedCounts-sd, ymax=NormalizedCounts+sd), width=0,
+                 position=position_dodge(0.05) )+
+  theme_few()+
+  ylim(c(0,NA)) +
+  labs(x = "Day", y = "RNA expression (normalized counts)")
+
+pdf("DHX8-lineplot.pdf",  width = 12, height = 5)
+grid.arrange(a, b,
+             widths = c(2.3,1.4),
+          ncol = 2, nrow = 1)
+dev.off()
+```
+
+
+# GO analysis
+## missMethyl GOmeth
+Geeleher et al. (Geeleher et al. 2013) showed there is a severe bias when performing gene ontology analysis with methylation data. This is due to the fact that there are differing numbers of probes per gene on several different array technologies. For the Illumina Infinium HumanMethylation450 array the number of probes per gene ranges from 1 to 1299, with a median of 15 probes per gene. For the EPIC array, the range is 1 to 1487, with a median of 20 probes per gene. This means that when annotating CpG sites to genes, a gene is more likely to be identified as differentially methylated if there are many CpG sites associated with the gene. We refer to this source of bias as “probe number bias”.
+
+One way to take into account this selection bias is to model the relationship between the number of probes per gene and the probability of being differentially methylated. This can be performed by adapting the goseq method of Young et al. (Young et al. 2010). Each gene then has a prior probability associated with it, and a modified version of a hypergeometric test can be performed, testing for over-representation of the selected genes in each gene set. The BiasedUrn package can be used to obtain p-values from the Wallenius’ noncentral hypergeometric distribution, taking into account the odds of differential methylation for each gene set. Note that the BiasedUrn package can occassionally return p-values of 0. For the gene sets where a p-value of exactly zero is outputted we perform a hypergeometric test, which ensures non-zero p-values and hence false discovery rates.
+
+We have recently uncovered a new source of bias in gene set testing for methylation array data (Maksimovic, Oshlack, and Phipson 2020) that we refer to as “multi-gene bias”. This second source of bias arises due to the fact that around 10% of gene-annotated CpGs are annotated to more than one gene, violating assumptions of independently measured genes. This can lead to some GO categories being identified as significantly enriched as they contain genes with methylation measurements from shared CpGs. This can occur for large gene families such as the protocadherin gamma gene cluster which happen to be over-represented in the GO category “GO:0007156: homophilic cell adhesion via plasma membrane adhesion molecules”. This is now taken into account in the gene set testing functions in missMethyl.
+
+## Day 7 vs day 0
+```{r Day 7 vs Day 0}
+  
+#TOP 10% UP and DOWN
+  
+msigb_7 = r_b_7[1:16160,] #Kjører GO på top 10000 CPGer
+msigb_7 = rownames(msigb_7)
+check <- getMappedEntrezIDs(sig.cpg = msigb_7, array.type = "EPIC")
+length(check$sig.eg) #CPGer mappet til gener
+
+gst_b_7 <- gometh(sig.cpg=msigb_7, all.cpg=rownames(t_b_7), collection="GO",
+              plot.bias=TRUE, array.type = "EPIC", prior.prob = TRUE, fract.counts = TRUE, anno = annoEPIC)
+gst_b_7 = gst_b_7[order(gst_b_7$P.DE),]
+
+topGSA(gst_b_7, n=20)
+
+
+gstsub1 = gst_b_7 %>% dplyr::filter(ONTOLOGY == "BP") 
+gstsub1b = gstsub1[1:30,]
+gstsub1b = gstsub1b %>% mutate(percent = DE/N*100)
+
+pdf("Day0vsday7ctrl_GOMETH.Top10PercentCpGs.pdf", width = 12, height = 10)
+  ggplot(gstsub1b, aes(x = percent, y = reorder(TERM,-P.DE), fill = FDR))+
+  geom_bar(stat = "identity") +
+    xlim(c(0,100)) +
+  scale_fill_continuous_sequential(palette = "Purple-Blue",guide = guide_colorbar(reverse = TRUE))+
+  labs(title = "GOMETH ctrl day 0 vs day 7",
+       subtitle = "Top 30 BP GO terms based on top 10% DM CpGs", x = "% DM genes in gene set", y = "")+
+  theme_minimal()#+
+dev.off()
+
+```
+
+## Day 13 vs day 0
+
+```{r Day 13 vs Day 0}
+
+#MissMmethyl GOmeth (use max 10000 cpgs to find relevant biological processes)
+msigb_13 = r_b_13[1:14687,] #Kjører GO på top 10%CPGer
+msigb_13 = rownames(msigb_13)
+check <- getMappedEntrezIDs(sig.cpg = msigb_13, array.type = "EPIC")
+length(check$sig.eg) #CPGer mappet til gener
+
+gst_b_13 <- gometh(sig.cpg=msigb_13, all.cpg=rownames(t_b_13), collection="GO",
+              plot.bias=TRUE, array.type = "EPIC", prior.prob = TRUE, fract.counts = TRUE, anno = annoEPIC)
+gst_b_13 = gst_b_13[order(gst_b_13$P.DE),]
+
+topGSA(gst_b_13, n=30)
+
+
+gstsub2 = gst_b_13 %>% dplyr::filter(ONTOLOGY == "BP") 
+gstsub2 = gstsub2[1:30,]
+gstsub2 = gstsub2 %>% mutate(percent = DE/N*100)
+
+
+pdf("Day0vsday13ctrl_GOMETH.pdf", width = 12, height = 10)
+  ggplot(gstsub2, aes(x = percent , y = reorder(TERM,-P.DE), fill = FDR))+
+  geom_bar(stat = "identity") +
+ scale_fill_continuous_sequential(palette = "Purple-Blue",
+                        guide = guide_colorbar(reverse = TRUE))+
+  xlim(c(0,100)) +
+  labs(title = "GOMETH ctrl day 0 vs day 13",
+       subtitle = "Top 30 BP GO terms based on top 10% DM CpGs", x = "% DM genes in gene set", y = "")+
+  theme_minimal()#+
+dev.off()
+
+```
+
+## Day 20 vs day 0
+
+```{r Day 20 vs Day 0}
+
+#MissMmethyl GOmeth (use max 10000 cpgs to find relevant biological processes)
+msigb_20 = r_b_20[1:21004,] #Kjører GO på top 10000 CPGer
+msigb_20 = rownames(msigb_20)
+check <- getMappedEntrezIDs(sig.cpg = msigb_20, array.type = "EPIC")
+length(check$sig.eg) #CPGer mappet til gener
+
+gst_b_20 <- gometh(sig.cpg=msigb_20, all.cpg=rownames(t_b_20), collection="GO",
+              plot.bias=TRUE, array.type = "EPIC", prior.prob = TRUE, fract.counts = TRUE, anno = annoEPIC)
+gst_b_20 = gst_b_20[order(gst_b_20$P.DE),]
+
+topGSA(gst_b_20, n=30)
+
+
+gstsub3 = gst_b_20 %>% dplyr::filter(ONTOLOGY == "BP") 
+gstsub3 = gstsub3[1:30,]
+gstsub3 = gstsub3 %>% mutate(percent = DE/N*100)
+
+
+pdf("Day0vsday20ctrl_GOMETH.pdf", width = 12, height = 10)
+  ggplot(gstsub3, aes(x = percent , y = reorder(TERM,-P.DE), fill = FDR))+
+  geom_bar(stat = "identity") +
+  #geom_text(aes(label=round(DE, digits = 0), x = 200), size = 3)+
+  scale_fill_continuous_sequential(palette = "Purple-Blue",
+                        guide = guide_colorbar(reverse = TRUE))+
+    xlim(0,100)+
+  labs(title = "GOMETH ctrl day 0 vs day 20",
+       subtitle = "Top 30 BP GO terms based on top 10% DM CpGs", x = "% DM genes in gene set", y = "")+
+  theme_minimal()#+
+  #theme(plot.title = element_text(hjust=1.2))
+dev.off()
+```
+
+
+## Day 13 vs day 7
+
+```{r Day 13 vs Day 7}
+#MissMmethyl GOmeth (use max 10000 cpgs to find relevant biological processes)
+msig7_13 = r_7_13[1:3954,] #Kjører GO på top 10% CPGer
+msig7_13 = rownames(msig7_13)
+check <- getMappedEntrezIDs(sig.cpg = msig7_13, array.type = "EPIC")
+length(check$sig.eg) #CPGer mappet til gener
+
+gst_7_13 <- gometh(sig.cpg=msig7_13, all.cpg=rownames(t_7_13), collection="GO",
+              plot.bias=TRUE, array.type = "EPIC", prior.prob = TRUE, fract.counts = TRUE, anno = annoEPIC)
+gst_7_13 = gst_7_13[order(gst_7_13$P.DE),]
+
+topGSA(gst_7_13, n=30)
+
+
+gstsub4 = gst_7_13 %>% dplyr::filter(ONTOLOGY == "BP") 
+gstsub4 = gstsub4[1:30,]
+gstsub4 = gstsub4 %>% mutate(percent = DE/N*100)
+
+
+pdf("Day7vsday13ctrl_GOMETH.pdf",width = 12, height = 10)
+  ggplot(gstsub4, aes(x = percent , y = reorder(TERM,-P.DE), fill = FDR))+
+  geom_bar(stat = "identity") +
+  scale_fill_continuous_sequential(palette = "Purple-Blue",
+                        guide = guide_colorbar(reverse = TRUE))+
+  xlim(0,100) +
+  labs(title = "GOMETH ctrl day 7 vs day 13",
+       subtitle = "Top 30 BP GO terms based on top 10% DM CpGs", x = "% DM genes in gene set", y = "")+
+  theme_minimal()
+dev.off()
+```
+
+## Day 20 vs day 7
+
+```{r Day 20 vs Day 7}
+
+#MissMmethyl GOmeth (use max 10000 cpgs to find relevant biological processes)
+msig7_20 = r_7_20[1:12278,] #Kjører GO på top 10000 CPGer
+msig7_20 = rownames(msig7_20)
+check <- getMappedEntrezIDs(sig.cpg = msig7_20, array.type = "EPIC")
+length(check$sig.eg) #CPGer mappet til gener
+
+gst_7_20 <- gometh(sig.cpg=msig7_20, all.cpg=rownames(t_7_20), collection="GO",
+              plot.bias=TRUE, array.type = "EPIC", prior.prob = TRUE, fract.counts = TRUE, anno = annoEPIC)
+gst_7_20 = gst_7_20[order(gst_7_20$P.DE),]
+
+topGSA(gst_7_20, n=30)
+
+
+gstsub5 = gst_7_20 %>% dplyr::filter(ONTOLOGY == "BP") 
+gstsub5 = gstsub5[1:30,]
+gstsub5 = gstsub5 %>% mutate(percent = DE/N*100)
+
+pdf("Day7vsday20ctrl_GOMETH.pdf", width = 12, height = 10)
+  ggplot(gstsub5, aes(x = percent , y = reorder(TERM,-P.DE), fill = FDR))+
+  geom_bar(stat = "identity") +
+  xlim(0,100)+
+  scale_fill_continuous_sequential(palette = "Purple-Blue",
+                        guide = guide_colorbar(reverse = TRUE))+
+  labs(title = "GOMETH ctrl day 7 vs day 20",
+       subtitle = "Top 30 BP GO terms based on top 10% DM CpGs", x = "% DM genes in gene set", y = "")+
+  theme_minimal()#
+dev.off()
+```
+
+## Day 20 vs day 13
+
+```{r Day 20 vs Day 13}
+
+#MissMmethyl GOmeth (use max 10000 cpgs to find relevant biological processes)
+msig13_20 = r_13_20[1:4767,] #Kjører GO på top 10% CPGer
+msig13_20 = rownames(msig13_20)
+check <- getMappedEntrezIDs(sig.cpg = msig13_20, array.type = "EPIC")
+length(check$sig.eg) #CPGer mappet til gener
+
+gst_13_20 <- gometh(sig.cpg=msig13_20, all.cpg=rownames(t_13_20), collection="GO",
+              plot.bias=TRUE, array.type = "EPIC", prior.prob = TRUE, fract.counts = TRUE, anno = annoEPIC)
+gst_13_20 = gst_13_20[order(gst_13_20$P.DE),]
+
+topGSA(gst_13_20, n=30)
+
+
+gstsub6 = gst_13_20 %>% dplyr::filter(ONTOLOGY == "BP") 
+gstsub6 = gstsub6[1:30,]
+gstsub6 = gstsub6 %>% mutate(percent = DE/N*100)
+
+
+pdf("Day13vsday20ctrl_GOMETH.pdf", width = 12, height = 10)
+  ggplot(gstsub6, aes(x = percent , y = reorder(TERM,-P.DE), fill = FDR))+
+  geom_bar(stat = "identity") +
+  scale_fill_continuous_sequential(palette = "Purple-Blue",
+                        guide = guide_colorbar(reverse = TRUE))+
+  xlim(0,100)+
+  labs(title = "GOMETH ctrl day 13 vs day 20",
+       subtitle = "Top 30 BP GO terms based on top 10% DM CpGs", x = "% DM genes in gene set", y = "")+
+  theme_minimal()
+  dev.off()
+```
+
+
+
+```{r}
+sessionInfo()
+```
