@@ -10,51 +10,22 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r import package, include=FALSE}
-# Libraries
-library(markdown)
-library(AnnotationHub)
-library(clustree)
-library(cowplot)
-library(ensembldb)
-library(ggthemes)
-library(ggplot2)
-library(ggplotify)
-library(gridGraphics)
-library(Matrix)
-library(org.Hs.eg.db)
-library(Matrix.utils)
-library(patchwork)
-library(reticulate)
-library(reshape2)
-library(RCurl)
-library(scales)
-library(scater)
-library(Seurat)
-library(SingleCellExperiment)
-library(SummarizedExperiment)
-library(EnsDb.Hsapiens.v86)
-library(BSgenome.Hsapiens.UCSC.hg38)
-library(chromVAR)
-library(tidyverse)
-library(edgeR)
-library(plotly)
-library(robustbase)
-library(knitr)
-library(ggpubr)
-library(clustree)
-library(extrafont)
-# Extra
-library(kableExtra) #load after dplyr
-library(JASPAR2018)
-library(TFBSTools)
-library(Signac)
+```{r setup Import packages, message=FALSE, warning=FALSE,include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+invisible(utils::memory.limit(64000))
+
+reqPkg = c("markdown","Seurat","SingleCellExperiment","SummarizedExperiment","EnsDb.Hsapiens.v86","BSgenome.Hsapiens.UCSC.hg38","AnnotationHub","clustree","cowplot","ensembldb","ggthemes","ggplot2","ggplotify","gridGraphics","Matrix","org.Hs.eg.db","Matrix.utils","patchwork","reticulate","reshape2","RCurl","scales","scater","chromVAR","tidyverse","edgeR","plotly","robustbase","knitr","ggpubr","clustree","dplyr","kableExtra", "VISION","JASPAR2018","TFBSTools","Signac")
+
+lapply(reqPkg, library, character.only = TRUE)
+
+# Memory
+options(future.globals.maxSize = 4000 * 1024^2) #Set a higher maximum memory size
+
 # Seed (set for reproducibility)
 set.seed(1234)
 
 # Increase threshold before R starts showing scientific notation
 options(scipen = 10L)
-
 ```
 
 <!-- ####################################   -->
