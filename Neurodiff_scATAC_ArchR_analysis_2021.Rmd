@@ -1,6 +1,6 @@
 ---
-title: "Neuro Differentiation Single Cell RNAseq"
-Authors: Ankush Sharma & Martin Falck 
+title: "Neuro Differentiation Single Cell ATACseq"
+Authors: Ankush Sharma 
 output:
   html_document:
     df_print: paged
